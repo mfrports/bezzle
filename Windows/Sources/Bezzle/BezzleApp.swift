@@ -16,10 +16,15 @@ import UWP
 @main
 enum Main {
     static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.first == HomePreviewWorker.command {
+            let result = MainActor.assumeIsolated { HomePreviewWorker.run(arguments) }
+            exit(result)
+        }
         Trace.time("main")
         // A second start of this Bezzle.exe gives what it was asked to open to the one running,
         // which opens it in tabs, and goes (HandOver).
-        if HandOver.pass(Array(CommandLine.arguments.dropFirst())) { return }
+        if HandOver.pass(arguments) { return }
         do {
             try startRuntime()
             Trace.time("Windows App Runtime started")
@@ -493,6 +498,7 @@ final class BezzleApp: SwiftApplication {
     /// down piece by piece first: WinUI fails fast doing that as the app ends (0xe0464645 in
     /// Microsoft.UI.Windowing.dll, seen on closing the window to quit), and nothing is left to keep.
     @MainActor private func finishQuitting() {
+        home?.previews.quit()
         Tabs.shared.closeAll()
         MCPServer.shared.stop()
         WebBrowser.shared.quitting()

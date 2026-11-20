@@ -175,9 +175,13 @@ nonisolated enum DesignPreview {
     /// newer than its last save. With `keepingDate`, as for a design caught up on from the home
     /// screen, the date stays, and the design keeps its place among the others there.
     @MainActor static func write(_ doc: BezzleDocument, assets: Assets?, to design: URL, keepingDate: Bool = false) {
+        store(jpeg(of: doc, assets: assets), in: design, keepingDate: keepingDate)
+    }
+
+    static func store(_ preview: @autoclosure () -> Data?, in design: URL, keepingDate: Bool) {
         var isFolder: ObjCBool = false
         guard FileManager.default.fileExists(atPath: design.path, isDirectory: &isFolder), isFolder.boolValue else { return }
-        let data = jpeg(of: doc, assets: assets)
+        let data = preview()
         let fm = FileManager.default
         let folder = design.appendingPathComponent(folderName, isDirectory: true), file = file(of: design)
         let date = (try? fm.attributesOfItem(atPath: design.path))?[.modificationDate] as? Date
@@ -219,19 +223,25 @@ extension WindowsCore {
         DesignPreview.write(doc, assets: assets, to: url)
     }
 
-    /// A design on the home screen without a current picture for the Finder, made before Bezzle
-    /// kept them, brought in from elsewhere, changed while closed or last saved by a Bezzle for
-    /// Windows from before, is given one, its date kept (the Mac's Library.seekPreview). Read on
-    /// its own: the design that is open stays as it is. True when it had to be made.
-    @discardableResult public static func catchUpPreview(of url: URL) -> Bool {
+    /// Draws both the Home card and, when it is out of date, the package preview from one read.
+    /// The Home worker owns its renderer and gives the finished pictures back to the window.
+    public static func drawHomePreview(of url: URL, width: Double, height: Double, scale: Double,
+                                       into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> (card: Bool, package: Data?) {
+        guard let doc = try? read(url) else { return (false, nil) }
+        let pictures = Assets(folder: url.appendingPathComponent("images"))
+        let card = thumbnail(of: doc, width: width, height: height, scale: scale, assets: pictures, into: fill)
         var isFolder: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), isFolder.boolValue else { return false }
-        guard !DesignPreview.isCurrent(for: url), let doc = try? read(url) else {
-            // Its picture is current (a Mac's, perhaps): Explorer's is brought up to it.
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), isFolder.boolValue,
+              !DesignPreview.isCurrent(for: url) else { return (card, nil) }
+        return (card, DesignPreview.jpeg(of: doc, assets: pictures) ?? Data())
+    }
+
+    /// Keeps the worker's package preview without advancing the design's modification date.
+    public static func keepHomePreview(_ jpeg: Data?, for url: URL) {
+        if DesignPreview.isCurrent(for: url) {
             DesignPreview.keepExplorerPicture(of: url)
-            return false
+        } else if let jpeg {
+            DesignPreview.store(jpeg.isEmpty ? nil : jpeg, in: url, keepingDate: true)
         }
-        DesignPreview.write(doc, assets: Assets(folder: url.appendingPathComponent("images")), to: url, keepingDate: true)
-        return true
     }
 }

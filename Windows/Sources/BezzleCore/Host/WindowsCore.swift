@@ -457,9 +457,14 @@ extension WindowsCore {
     public static func thumbnail(of url: URL, width: Double, height: Double, scale: Double, into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
         // Read on its own: the design that is open, its file and its undo stay as they are.
         guard let doc = try? read(url) else { return false }
-        let pictures = Assets(folder: url.appendingPathComponent("images"))
+        return thumbnail(of: doc, width: width, height: height, scale: scale,
+                         assets: Assets(folder: url.appendingPathComponent("images")), into: fill)
+    }
+
+    static func thumbnail(of doc: BezzleDocument, width: Double, height: Double, scale: Double, assets: Assets,
+                          into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
         let first = Images.shared.list.last.map { $0.id + 1 } ?? 0
-        guard let image = Renderer.thumbnail(of: doc, size: CGSize(width: width, height: height), scale: CGFloat(scale), assets: pictures, cover: true) else { return false }
+        guard let image = Renderer.thumbnail(of: doc, size: CGSize(width: width, height: height), scale: CGFloat(scale), assets: assets, cover: true) else { return false }
         for picture in Images.shared.list where picture.id >= first { send(picture) }
         defer { forget(before: first) }
         guard let pixels = fill(image.width, image.height) else { return false }
