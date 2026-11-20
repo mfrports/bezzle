@@ -30,10 +30,11 @@ extension WindowsCore {
 
     /// Draws a layer lying on the canvas (`index` among the design's) over its reach, at `scale`
     /// pixels a point, into pixels as `render(board:)` does.
-    public static func render(loose index: Int, scale: Double, hiding: Set<UUID> = [], into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
+    public static func render(loose index: Int, scale: Double, hiding: Set<UUID> = [], part: CGRect? = nil,
+                              into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
         guard let doc = design, doc.nodes.indices.contains(index), !doc.nodes[index].isArtboard else { return false }
         let node = doc.nodes[index]
-        let r = Renderer.reach(of: node).integral
+        let r = part ?? Renderer.reach(of: node).integral
         let size = CGSize(width: max(1, (r.width * CGFloat(scale)).rounded()), height: max(1, (r.height * CGFloat(scale)).rounded()))
         let first = Images.shared.list.last.map { $0.id + 1 } ?? 0
         guard let ctx = Renderer.bitmap(size) else { return false }
