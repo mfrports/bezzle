@@ -610,3 +610,12 @@ The tab covered by the window's paper with Bezzle's mark pressed into it while t
   build against real Google Drive with planted copies. The Mac was notarized with the API key
   (`ASC_KEY_PATH`), as the keychain profile `harness-notary` was gone from this Mac that afternoon;
   the Windows installers are the dry run's, not run.
+
+- **1.9.4 as released, not watched** (2026-11-20, the Mac and Windows from 6b820d5, for
+  MarcDietschi's Windows speed-ups from his fork: the zoom refreshes only the canvas and its label,
+  and the font scan reuses each file's first 4 KB). The tests were not run (Erik: "no tests"). The
+  changes were built in the VM and tried in a Debug copy: zoom over the AI server and with
+  Ctrl+wheel (label, rulers, selection and panels following, nothing moving at the 2% floor), and
+  the old and new font readers over the VM's 143 font files gave the same 166 faces (30 to 21 ms).
+  The Mac was notarized with the API key, `harness-notary` still missing; the Windows installers
+  are the dry run's, not run, and no installed 1.9.3 was seen taking the update.
