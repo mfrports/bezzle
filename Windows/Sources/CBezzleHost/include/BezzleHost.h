@@ -226,6 +226,9 @@ void bz_picture_forget(int32_t id);
 /// by `blur` (Core Graphics' measure: twice the sigma), in `rgb` at `alpha`, drawn into premultiplied
 /// BGRA pixels `pad` larger on every side. Returns 0 when done.
 int32_t bz_shadow(int32_t width, int32_t height, int32_t pad, double blur, double dy, uint32_t rgb, double alpha, void *pixels);
+/// The same shadow, drawn into a window whose origin is relative to the artboard's top-left.
+int32_t bz_shadow_part(double boardWidth, double boardHeight, double left, double top, int32_t width, int32_t height,
+                       double blur, double dy, uint32_t rgb, double alpha, void *pixels);
 /// Home's table: `table` in a rectangle of radius 20 (points, at `scale` pixels each), a pool of
 /// `light` at `strength` round (`x`, `y`) (fractions of the width and height) out to `reach` of the
 /// diagonal, and black at `shade` towards the bottom; into BGRA pixels. Returns 0 when done.

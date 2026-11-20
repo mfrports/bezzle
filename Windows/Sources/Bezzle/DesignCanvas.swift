@@ -53,18 +53,56 @@ final class DesignCanvas {
     let liveCanvas = LiveCanvas()
 
     private var boards: [WindowsCore.Board] = []
+    private static let rasterMargin = 192.0
+    private struct CanvasSurface {
+        let view = Image()
+        private(set) var bitmap: WriteableBitmap?
+        private(set) var area: CanvasRasterArea?
+        private var needsDraw = false
+
+        mutating func update(_ next: CanvasRasterArea?, refreshing: Bool,
+                             draw: (CanvasRasterArea, (Int, Int) -> UnsafeMutableRawPointer?) -> Bool) -> Bool {
+            guard let next else { clear(); return false }
+            guard refreshing || needsDraw || area != next || bitmap == nil else { return false }
+            var target = bitmap
+            let drawn = draw(next) { width, height in
+                if target == nil || target!.pixelWidth != Int32(width) || target!.pixelHeight != Int32(height) {
+                    target = WriteableBitmap(Int32(width), Int32(height))
+                }
+                return (try? target?.pixelBuffer.buffer).flatMap { $0.map(UnsafeMutableRawPointer.init) }
+            }
+            guard drawn, let target else { needsDraw = true; return false }
+            try? target.invalidate()
+            if bitmap !== target { view.source = target }
+            bitmap = target
+            area = next
+            needsDraw = false
+            return true
+        }
+
+        mutating func clear() {
+            guard bitmap != nil else { return }
+            view.source = nil
+            bitmap = nil
+            area = nil
+            needsDraw = false
+            view.visibility = .collapsed
+        }
+    }
+
     private struct Sheet {
-        let image = Image()
-        var bitmap: WriteableBitmap?
-        let shadow = Image()
-        var shadowBitmap: WriteableBitmap?
-        var shadowPad = 0.0
+        var image = CanvasSurface()
+        var shadow = CanvasSurface()
         let name = TextBlock()
+        var title: String?
+        var id: UUID?
+        var shadowColour: UInt32?
+        var shadowScale: Double?
     }
     private var sheets: [Int: Sheet] = [:]
     /// Layers lying on the canvas outside artboards, each drawn on its own, by their place in the design.
     private var loose: [WindowsCore.Loose] = []
-    private var looseSheets: [Int: (image: Image, bitmap: WriteableBitmap?)] = [:]
+    private var looseSheets: [Int: CanvasSurface] = [:]
 
     /// The hovered layer's outline, 1.5 wide; each selected layer's, 1 wide, along its turn (a
     /// line's two ends), in the colour of component copies for one; the box round several, dashed.
@@ -631,7 +669,10 @@ final class DesignCanvas {
             guard let self else { return }
             self.pixelScale = self.root.xamlRoot?.rasterizationScale ?? 1
             // Fitted as the design opens; its tab coming back to the front shows it as it was left.
-            guard !self.fitted else { return }
+            if self.fitted {
+                if self.session.isFront { self.place() }
+                return
+            }
             self.fitted = true
             self.lookFirst()
         }
@@ -677,6 +718,13 @@ final class DesignCanvas {
     /// The keys come here again, from a field that was typed into.
     func takeKeys() {
         _ = try? root.focus(.programmatic)
+    }
+
+    /// Size changes behind another tab could not draw that tab's design.
+    func refreshViewport() {
+        guard fitted, root.isLoaded, session.isFront else { return }
+        pixelScale = root.xamlRoot?.rasterizationScale ?? pixelScale
+        place()
     }
 
     /// Whether `panel` holds `child`, asked of the panel: WinUI's own `parent` can say nil for an
@@ -761,44 +809,47 @@ final class DesignCanvas {
     private func drawAll() {
         if !letters.step().isEmpty { placeEditor() }
         boards = WindowsCore.boards()
-        for k in boards.indices { draw(k) }
-        for (k, sheet) in sheets where k >= boards.count {
-            for e in [sheet.image, sheet.shadow] as [UIElement] { e.visibility = .collapsed }
+        let visible = rasterViewport
+        for k in boards.indices { draw(k, visible: visible) }
+        for (k, old) in sheets where k >= boards.count {
+            var sheet = old
+            sheet.image.clear()
+            sheet.shadow.clear()
             sheet.name.visibility = .collapsed
+            sheets[k] = sheet
         }
-        drawLoose()
-        place()
+        drawLoose(visible: visible)
+        place(refreshingCanvas: false)
     }
 
     /// The layers lying on the canvas drawn again, each over as much as it paints.
-    private func drawLoose() {
-        loose = WindowsCore.looseLayers()
-        let scale = zoom * pixelScale
+    private func drawLoose(visible: CGRect? = nil, refreshing: Bool = true) {
+        if refreshing { loose = WindowsCore.looseLayers() }
+        let view = visible ?? rasterViewport
         var shown = Set<Int>()
         for item in loose {
-            var sheet = looseSheets[item.index] ?? {
-                let image = Image()
-                image.isHitTestVisible = false
-                stage.children.append(image)
-                return (image, nil)
+            var surface = looseSheets[item.index] ?? {
+                let surface = CanvasSurface()
+                surface.view.isHitTestVisible = false
+                stage.children.append(surface.view)
+                return surface
             }()
-            var bitmap = sheet.bitmap
-            _ = WindowsCore.render(loose: item.index, scale: scale, hiding: hiding(on: item.index)) { width, height in
-                if bitmap == nil || bitmap!.pixelWidth != Int32(width) || bitmap!.pixelHeight != Int32(height) {
-                    bitmap = WriteableBitmap(Int32(width), Int32(height))
-                }
-                return (try? bitmap?.pixelBuffer.buffer).flatMap { $0.map(UnsafeMutableRawPointer.init) }
+            let area = rasterArea(item.reach, visible: view, keeping: surface.area)
+            let drew = surface.update(area, refreshing: refreshing) { area, fill in
+                WindowsCore.render(loose: item.index, scale: area.scale, hiding: hiding(on: item.index),
+                                   part: area.whole ? nil : area.rect, into: fill)
             }
-            try? bitmap?.invalidate()
-            if sheet.bitmap !== bitmap { sheet.image.source = bitmap }
-            sheet.bitmap = bitmap
-            sheet.image.visibility = .visible
-            looseSheets[item.index] = sheet
+            place(surface)
+            looseSheets[item.index] = surface
             // Pictures on their way in it, drawn developing again over what was drawn anew.
-            if developingShown[item.index] != nil { developInto(loose: item) }
+            if drew, developingShown[item.index] != nil { developInto(loose: item) }
             shown.insert(item.index)
         }
-        for (k, sheet) in looseSheets where !shown.contains(k) { sheet.image.visibility = .collapsed }
+        for (k, old) in looseSheets where !shown.contains(k) {
+            var surface = old
+            surface.clear()
+            looseSheets[k] = surface
+        }
     }
 
     /// What shows `board` (an artboard, or a layer on the canvas) drawn again.
@@ -850,56 +901,75 @@ final class DesignCanvas {
         if editing != nil { drawTyping() }
     }
 
-    /// Artboard `k` drawn again by the core at the zoom's pixels, with its shadow.
-    private func draw(_ k: Int) {
+    private var rasterViewport: CGRect {
+        let visible = visibleOnCanvas
+        if !visible.isEmpty { return visible }
+        let origin = inDesign(.zero)
+        return CGRect(origin: origin, size: CGSize(width: root.actualWidth / zoom, height: root.actualHeight / zoom))
+    }
+
+    private var rasterScale: Double { min(zoom, session.zoom) * pixelScale }
+
+    private func rasterArea(_ bounds: CGRect, visible: CGRect, keeping current: CanvasRasterArea?) -> CanvasRasterArea? {
+        CanvasRasterArea.select(bounds: bounds, visible: visible, margin: Self.rasterMargin / zoom,
+                                scale: rasterScale, keeping: current, flying: flyingZoom != nil)
+    }
+
+    /// Artboard `k` drawn over its visible part, with its shadow.
+    private func draw(_ k: Int, visible: CGRect? = nil, refreshing: Bool = true) {
         guard boards.indices.contains(k) else { return }
         let board = boards[k]
         var sheet = sheets[k] ?? {
             let sheet = Sheet()
-            sheet.shadow.isHitTestVisible = false
-            sheet.image.isHitTestVisible = false
+            sheet.shadow.view.isHitTestVisible = false
+            sheet.image.view.isHitTestVisible = false
             sheet.name.fontFamily = Theme.ui
             sheet.name.fontSize = 11
             sheet.name.fontWeight = FontWeight(weight: 500)
             sheet.name.textTrimming = .characterEllipsis
             sheet.name.isHitTestVisible = false
-            stage.children.append(sheet.shadow)
+            stage.children.append(sheet.shadow.view)
             stage.children.append(sheet.name)
-            stage.children.append(sheet.image)
+            stage.children.append(sheet.image.view)
             return sheet
         }()
-        let scale = zoom * pixelScale
-        var bitmap = sheet.bitmap
-        sheet.image.visibility = board.id == filmCovers ? .collapsed : .visible
-        sheet.shadow.visibility = .visible
-        _ = WindowsCore.render(board: board.index, scale: scale, hiding: hiding(on: board.index)) { width, height in
-            if bitmap == nil || bitmap!.pixelWidth != Int32(width) || bitmap!.pixelHeight != Int32(height) {
-                bitmap = WriteableBitmap(Int32(width), Int32(height))
-            }
-            return (try? bitmap?.pixelBuffer.buffer).flatMap { $0.map(UnsafeMutableRawPointer.init) }
+        let view = visible ?? rasterViewport
+        let bounds = board.drawn.isEmpty ? board.frame : board.drawn
+        let area = rasterArea(bounds, visible: view, keeping: sheet.image.area)
+        let drew = sheet.image.update(area, refreshing: refreshing || sheet.id != board.id) { area, fill in
+            WindowsCore.render(board: board.index, scale: area.scale, hiding: hiding(on: board.index),
+                               part: area.whole ? nil : area.rect, into: fill)
         }
-        try? bitmap?.invalidate()
-        if sheet.bitmap !== bitmap { sheet.image.source = bitmap }
-        sheet.bitmap = bitmap
-
-        var shadow = sheet.shadowBitmap
-        var pad = 0
-        let w = Int((Double(board.frame.width) * scale).rounded()), h = Int((Double(board.frame.height) * scale).rounded())
-        _ = WindowsCore.artboardShadow(width: w, height: h, scale: pixelScale, colour: Theme.shadow) { width, height, p in
-            pad = p
-            if shadow == nil || shadow!.pixelWidth != Int32(width) || shadow!.pixelHeight != Int32(height) {
-                shadow = WriteableBitmap(Int32(width), Int32(height))
-            }
-            return (try? shadow?.pixelBuffer.buffer).flatMap { $0.map(UnsafeMutableRawPointer.init) }
+        sheet.id = board.id
+        drawShadow(of: board.frame, visible: view, sheet: &sheet)
+        place(sheet.image, shown: board.id != filmCovers)
+        place(sheet.shadow)
+        if sheet.title != board.name {
+            sheet.name.text = board.name
+            sheet.title = board.name
         }
-        try? shadow?.invalidate()
-        if sheet.shadowBitmap !== shadow { sheet.shadow.source = shadow }
-        sheet.shadowBitmap = shadow
-        sheet.shadowPad = Double(pad) / pixelScale
-        sheet.name.text = board.name
         sheets[k] = sheet
         // Pictures on their way on it, drawn developing again over what was drawn anew.
-        if developingShown[board.index] != nil { developInto(k) }
+        if drew, developingShown[board.index] != nil { developInto(k) }
+    }
+
+    private func drawShadow(of frame: CGRect, visible: CGRect, sheet: inout Sheet) {
+        let scale = sheet.image.area?.scale ?? rasterScale
+        let pad = (14 * pixelScale).rounded(.up)
+        let width = (frame.width * scale).rounded(), height = (frame.height * scale).rounded()
+        let bounds = CGRect(x: frame.minX - pad / scale, y: frame.minY - pad / scale,
+                            width: (width + 2 * pad) / scale, height: (height + 2 * pad) / scale)
+        let area = CanvasRasterArea.select(bounds: bounds, visible: visible, margin: Self.rasterMargin / zoom,
+                                           scale: scale, keeping: sheet.shadow.area)
+        let colour = Theme.shadow
+        let refresh = colour != sheet.shadowColour || pixelScale != sheet.shadowScale
+        _ = sheet.shadow.update(area, refreshing: refresh) { area, fill in
+            let part = area.pixels.offsetBy(dx: -pad, dy: -pad)
+            return WindowsCore.artboardShadow(boardWidth: width, boardHeight: height, part: part,
+                                               scale: pixelScale, colour: colour, into: fill)
+        }
+        sheet.shadowColour = colour
+        sheet.shadowScale = pixelScale
     }
 
     /// Everything where the zoom and pan put it.
@@ -945,25 +1015,30 @@ final class DesignCanvas {
         }
     }
 
-    private func place() {
+    private func place(_ surface: CanvasSurface, shown: Bool = true) {
+        guard let area = surface.area else { return }
+        guard shown else { surface.view.visibility = .collapsed; return }
+        let rect = onStage(rect: area.rect)
+        try? Canvas.setLeft(surface.view, rect.minX)
+        try? Canvas.setTop(surface.view, rect.minY)
+        surface.view.width = rect.width
+        surface.view.height = rect.height
+        surface.view.visibility = .visible
+    }
+
+    private func place(refreshingCanvas: Bool = true) {
         drawPaper()
         margin.draw()
         drawFound()
+        if refreshingCanvas, session.isFront {
+            let visible = rasterViewport
+            for k in boards.indices { draw(k, visible: visible, refreshing: false) }
+            drawLoose(visible: visible, refreshing: false)
+        }
         for (k, board) in boards.enumerated() {
             guard let sheet = sheets[k] else { continue }
             let at = onStage(board.frame.origin)
-            let w = Double(board.frame.width) * zoom, h = Double(board.frame.height) * zoom
-            // The picture covers what runs past the edges too, when the artboard shows it.
-            let drawn = board.drawn.isEmpty ? board.frame : board.drawn
-            let from = onStage(drawn.origin)
-            try? Canvas.setLeft(sheet.image, Double(from.x))
-            try? Canvas.setTop(sheet.image, Double(from.y))
-            sheet.image.width = Double(drawn.width) * zoom
-            sheet.image.height = Double(drawn.height) * zoom
-            try? Canvas.setLeft(sheet.shadow, Double(at.x) - sheet.shadowPad)
-            try? Canvas.setTop(sheet.shadow, Double(at.y) - sheet.shadowPad)
-            sheet.shadow.width = w + 2 * sheet.shadowPad
-            sheet.shadow.height = h + 2 * sheet.shadowPad
+            let w = Double(board.frame.width) * zoom
             // The name 19 above, as wide as the artboard (at least 40), gone under 30 wide; a
             // carousel's as wide as its first slide, less the room for its number.
             try? Canvas.setLeft(sheet.name, Double(at.x))
@@ -975,14 +1050,6 @@ final class DesignCanvas {
         placeSlideMarks()
         drawAids()
         decks.update()
-        for item in loose {
-            guard let sheet = looseSheets[item.index] else { continue }
-            let at = onStage(item.reach.origin)
-            try? Canvas.setLeft(sheet.image, Double(at.x))
-            try? Canvas.setTop(sheet.image, Double(at.y))
-            sheet.image.width = Double(item.reach.width) * zoom
-            sheet.image.height = Double(item.reach.height) * zoom
-        }
         letters.draw()
         placeOverlays()
         placeFilm()
@@ -1021,7 +1088,8 @@ final class DesignCanvas {
         guard filmCovers != id || id != nil else { return }
         filmCovers = id
         for (k, board) in boards.enumerated() {
-            sheets[k]?.image.visibility = board.id == id ? .collapsed : .visible
+            guard let image = sheets[k]?.image else { continue }
+            image.view.visibility = board.id == id || image.bitmap == nil ? .collapsed : .visible
         }
     }
 
@@ -6199,8 +6267,8 @@ extension DesignCanvas {
     /// Leaves a deck's artboard to the cards the deck layer draws over it, or shows it again.
     fileprivate func hideSheet(_ id: UUID, _ hide: Bool) {
         guard let k = boards.firstIndex(where: { $0.id == id }), let sheet = sheets[k] else { return }
-        sheet.image.opacity = hide ? 0 : 1
-        sheet.shadow.opacity = hide ? 0 : 1
+        sheet.image.view.opacity = hide ? 0 : 1
+        sheet.shadow.view.opacity = hide ? 0 : 1
     }
 }
 
@@ -6461,24 +6529,23 @@ extension DesignCanvas {
 
     /// Artboard `k`'s picture with its pictures on their way drawn developing over it.
     func developInto(_ k: Int) {
-        guard boards.indices.contains(k), let bitmap = sheets[k]?.bitmap else { return }
-        let board = boards[k]
-        develop(place: board.index, over: board.drawn.isEmpty ? board.frame : board.drawn, into: bitmap)
+        guard boards.indices.contains(k), let image = sheets[k]?.image else { return }
+        develop(place: boards[k].index, into: image)
     }
 
     /// A layer on the canvas's picture with its pictures on their way drawn developing over it.
     func developInto(loose item: WindowsCore.Loose) {
-        guard let bitmap = looseSheets[item.index]?.bitmap else { return }
-        develop(place: item.index, over: item.reach, into: bitmap)
+        guard let surface = looseSheets[item.index] else { return }
+        develop(place: item.index, into: surface)
     }
 
     /// The picture of the design's layer at `place`, `drawn` over that part of the canvas, with its
     /// pictures on their way drawn developing over it, as far as they are in sight, on its own pixels.
-    private func develop(place: Int, over drawn: CGRect, into bitmap: WriteableBitmap) {
-        guard let items = developingShown[place] else { return }
-        let s = zoom * pixelScale
+    private func develop(place: Int, into surface: CanvasSurface) {
+        guard let items = developingShown[place], let area = surface.area, let bitmap = surface.bitmap else { return }
+        let drawn = area.rect, s = area.scale
         let w = Int(bitmap.pixelWidth), h = Int(bitmap.pixelHeight)
-        let box = items.map(\.box).reduce(CGRect.null) { $0.union($1) }.intersection(visibleOnCanvas)
+        let box = items.map(\.box).reduce(CGRect.null) { $0.union($1) }.intersection(drawn)
         guard !box.isNull else { return }
         let x0 = max(0, Int((Double(box.minX - drawn.minX) * s).rounded(.down))), x1 = min(w, Int((Double(box.maxX - drawn.minX) * s).rounded(.up)))
         let y0 = max(0, Int((Double(box.minY - drawn.minY) * s).rounded(.down))), y1 = min(h, Int((Double(box.maxY - drawn.minY) * s).rounded(.up)))

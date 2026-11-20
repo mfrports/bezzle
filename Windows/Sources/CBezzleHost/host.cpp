@@ -3165,8 +3165,14 @@ extern "C" int32_t bz_pdf_end(int32_t pdf) {
 
 extern "C" int32_t bz_shadow(int32_t width, int32_t height, int32_t pad, double blur, double dy, uint32_t rgb, double alpha, void* pixels) {
     const int w = std::max(1, width + 2 * pad), h = std::max(1, height + 2 * pad);
-    const SkImageInfo info = SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB());
-    auto surface = SkSurfaces::WrapPixels(info, pixels, size_t(w) * 4);
+    return bz_shadow_part(width, height, -pad, -pad, w, h, blur, dy, rgb, alpha, pixels);
+}
+
+extern "C" int32_t bz_shadow_part(double boardWidth, double boardHeight, double left, double top, int32_t width, int32_t height,
+                                    double blur, double dy, uint32_t rgb, double alpha, void* pixels) {
+    if (width <= 0 || height <= 0 || !pixels) return 1;
+    const SkImageInfo info = SkImageInfo::Make(width, height, kBGRA_8888_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB());
+    auto surface = SkSurfaces::WrapPixels(info, pixels, size_t(width) * 4);
     if (!surface) return 1;
     SkCanvas* canvas = surface->getCanvas();
     canvas->clear(SK_ColorTRANSPARENT);
@@ -3174,7 +3180,7 @@ extern "C" int32_t bz_shadow(int32_t width, int32_t height, int32_t pad, double 
     paint.setAntiAlias(true);
     paint.setColor4f({float((rgb >> 16 & 0xFF) / 255.0), float((rgb >> 8 & 0xFF) / 255.0), float((rgb & 0xFF) / 255.0), float(alpha)});
     if (blur > 0) paint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, float(blur / 2)));
-    canvas->drawRect(SkRect::MakeXYWH(float(pad), float(pad + dy), float(width), float(height)), paint);
+    canvas->drawRect(SkRect::MakeXYWH(float(-left), float(dy - top), float(boardWidth), float(boardHeight)), paint);
     return 0;
 }
 
