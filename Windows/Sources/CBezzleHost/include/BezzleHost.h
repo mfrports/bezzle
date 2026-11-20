@@ -157,6 +157,9 @@ int32_t bz_heif_problem(void);
 /// Adds one of a design's pictures by name, as its encoded bytes. Returns its asset number, 0
 /// if Skia cannot read it.
 int32_t bz_asset_add(const char *name, const void *data, int32_t count);
+/// Registers a picture from a design package. JPEG pixels are decoded on the first lookup.
+/// Returns 1 if registered, or 0 if the image could not be read.
+int32_t bz_asset_add_from_package(const char *name, const void *data, int32_t count);
 /// Shows a picture that is not here yet by its glimpse (a JPEG a few dozen pixels across, from
 /// whoever placed it in a shared design), until bz_asset_add brings the picture itself: grown to
 /// `longest` across and blurred, as the Mac's LiveGlimpse.standIn makes it. Returns its asset
