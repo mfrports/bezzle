@@ -19,15 +19,17 @@ extension WindowsCore {
     nonisolated(unsafe) static var unreadable: [String: PictureTrouble] = [:]
 
     /// Gives Skia one of a design's pictures by name, as its file's bytes; an HEIC picture Windows
-    /// cannot read is noted. Its asset number, 0 when it could not be read.
-    @discardableResult static func giveSkia(_ name: String, _ data: Data) -> Int32 {
-        let number = data.withUnsafeBytes { bz_asset_add(name, $0.baseAddress, Int32($0.count)) }
-        if number != 0 {
+    /// cannot read is noted. JPEGs from a package are decoded when their pixels are first needed.
+    static func giveSkia(_ name: String, _ data: Data, fromPackage: Bool = false) {
+        let added = data.withUnsafeBytes { bytes in
+            if fromPackage { return bz_asset_add_from_package(name, bytes.baseAddress, Int32(bytes.count)) != 0 }
+            return bz_asset_add(name, bytes.baseAddress, Int32(bytes.count)) != 0
+        }
+        if added {
             unreadable[name] = nil
         } else if data.withUnsafeBytes({ bz_heif_sniff($0.baseAddress, Int64($0.count)) }) != 0 {
             unreadable[name] = PictureTrouble(rawValue: bz_heif_problem()) ?? .unreadable
         }
-        return number
     }
 
     /// Why HEIC pictures in the open design show grey, when some do and Windows lacks what reads
