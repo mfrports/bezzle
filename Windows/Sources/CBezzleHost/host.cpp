@@ -180,6 +180,8 @@ struct Asset {
     std::shared_ptr<std::vector<uint8_t>> avifFile;
     bool developLooked = false;
     sk_sp<SkImage> developFrom;
+    // The current package JPEG's bytes, to recognize the same picture on another read.
+    sk_sp<const SkData> packageJPEG;
 };
 std::vector<Asset> assets;                      // by number - 1
 std::map<std::string, int> assetsByName;
@@ -188,6 +190,10 @@ std::map<std::string, sk_sp<SkImage>> pendingJPEGs;
 std::set<std::string> standIns;
 
 int keepAsset(const std::string& name, Asset asset) {
+    // Old picture numbers can still be drawn, but only the current one is looked up by name.
+    if (auto previous = assetsByName.find(name); previous != assetsByName.end()) {
+        assets[previous->second - 1].packageJPEG.reset();
+    }
     assets.push_back(std::move(asset));
     const int number = int(assets.size());
     assetsByName[name] = number;
@@ -599,10 +605,11 @@ extern "C" int32_t bz_heif_problem(void) { return int32_t(heif::lastProblem()); 
 
 void loadPendingJPEG(const std::string& name) {
     if (auto pending = pendingJPEGs.find(name); pending != pendingJPEGs.end()) {
-        auto image = rasterWithMipmaps(pending->second);
+        Asset asset{rasterWithMipmaps(pending->second)};
+        if (asset.image) asset.packageJPEG = pending->second->refEncodedData();
         pendingJPEGs.erase(pending);
         // If decoding fails, keep any image or glimpse already registered under this name.
-        if (image) keepAsset(name, Asset{std::move(image)});
+        if (asset.image) keepAsset(name, std::move(asset));
     }
 }
 
@@ -2713,9 +2720,15 @@ extern "C" int32_t bz_asset_add_from_package(const char* name, const void* data,
     if (!data || count <= 0) return 0;
     std::lock_guard<std::mutex> guard(lock);
     if (!SkJpegDecoder::IsJpeg(data, size_t(count))) return addAsset(name, data, count) != 0;
+    const auto matches = [&](const sk_sp<const SkData>& bytes) {
+        return bytes && bytes->size() == size_t(count) && std::memcmp(bytes->data(), data, size_t(count)) == 0;
+    };
+    if (auto found = assetsByName.find(name); found != assetsByName.end() && matches(assets[found->second - 1].packageJPEG)) {
+        pendingJPEGs.erase(name);
+        return 1;
+    }
     if (auto pending = pendingJPEGs.find(name); pending != pendingJPEGs.end()) {
-        auto bytes = pending->second->refEncodedData();
-        if (bytes && bytes->size() == size_t(count) && std::memcmp(bytes->data(), data, size_t(count)) == 0) return 1;
+        if (matches(pending->second->refEncodedData())) return 1;
         // Only replace an earlier pending JPEG if its replacement can be decoded.
         return addAsset(name, data, count) != 0;
     }
