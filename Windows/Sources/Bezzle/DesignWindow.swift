@@ -365,7 +365,12 @@ final class DesignWindow {
         resources.readLibraries()
         if find.isOpen { find.refresh() }
         let canvas = canvas
-        DispatchQueue.main.async { MainActor.assumeIsolated { canvas.takeKeys() } }
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                canvas.refreshViewport()
+                canvas.takeKeys()
+            }
+        }
     }
 
     /// The ruler of time out, or away again.

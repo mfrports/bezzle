@@ -184,10 +184,11 @@ public enum WindowsCore {
     /// Draws artboard `index` as `render` does, into pixels the caller has: its size first, then,
     /// in `fill`, where to put the premultiplied BGRA pixels, rows top first (a WinUI
     /// WriteableBitmap's own layout). The layers `hiding` are left out.
-    public static func render(board index: Int, scale: Double, hiding: Set<UUID> = [], into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
+    public static func render(board index: Int, scale: Double, hiding: Set<UUID> = [], part: CGRect? = nil,
+                              into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
         guard var doc = design, index < doc.nodes.count else { return false }
         // As much of the canvas as the artboard covers with them all: what the canvas places it by.
-        let part = drawn(seen(doc.nodes[index]))
+        let part = part ?? drawn(seen(doc.nodes[index]))
         // The text being typed into is shown by its editor, not drawn under it, as on the Mac, and
         // texts whose letters are on their way by the canvas, over the design.
         for id in hiding { doc.update(id) { $0.hidden = true } }
@@ -315,6 +316,15 @@ extension WindowsCore {
         let pad = Int((14 * scale).rounded(.up))
         guard let pixels = fill(width + 2 * pad, height + 2 * pad, pad) else { return false }
         return bz_shadow(Int32(width), Int32(height), Int32(pad), 10 * scale, 2 * scale, colour, 0.13, pixels) == 0
+    }
+
+    /// Draws just `part` of that shadow, in pixels relative to the artboard's top-left.
+    public static func artboardShadow(boardWidth: Double, boardHeight: Double, part: CGRect, scale: Double,
+                                      colour: UInt32, into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
+        let width = Int32(part.width), height = Int32(part.height)
+        guard let pixels = fill(Int(width), Int(height)) else { return false }
+        return bz_shadow_part(boardWidth, boardHeight, part.minX, part.minY, width, height,
+                              10 * scale, 2 * scale, colour, 0.13, pixels) == 0
     }
 }
 
