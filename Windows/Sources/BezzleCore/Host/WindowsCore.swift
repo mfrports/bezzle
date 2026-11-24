@@ -323,7 +323,7 @@ extension WindowsCore {
     /// changes first, in this computer's own files in it (`SharedSession.persist`), then its
     /// document.json (sorted keys), written whole; a package gone meanwhile is looked for (a shared
     /// design renamed by someone else) and otherwise made again, so nothing is lost. True when the
-    /// design was written.
+    /// current design is on disk. An unshared local document that already has those bytes keeps its file.
     ///
     /// In a folder a sync service keeps in step, only what was changed here: with nothing changed on
     /// this computer since it last wrote, nothing is written, so that one only looking on writes
@@ -359,11 +359,15 @@ extension WindowsCore {
         let data = try encoder.encode(doc)
         var isFolder: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder)
+        let file: URL
         if exists, !isFolder.boolValue {
-            try data.write(to: url, options: .atomic)
+            file = url
         } else {
             try FileManager.default.createDirectory(at: url.appendingPathComponent("images", isDirectory: true), withIntermediateDirectories: true)
-            try data.write(to: url.appendingPathComponent("document.json"), options: .atomic)
+            file = url.appendingPathComponent("document.json")
+        }
+        if sharing != nil || inSyncedFolder || (try? Data(contentsOf: file)) != data {
+            try data.write(to: file, options: .atomic)
         }
         // Pictures and versions from the relay that the folder has not brought by now go in with
         // this computer's own change; those it brought are forgotten (`arrivals`).
