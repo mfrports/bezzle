@@ -49,6 +49,9 @@ public enum WindowsCore {
     /// was done here when it moves on.
     nonisolated(unsafe) static var designVersion = 0
     nonisolated(unsafe) static var assets = Assets(folder: nil)
+    /// The package whose decoded pixels the active design holds, or zero with no design.
+    static var rasterPackage: UInt64 = 0
+    private static var nextRasterPackage: UInt64 = 0
     /// Where the open design is kept: its package, or its file.
     nonisolated(unsafe) public internal(set) static var designURL: URL?
 
@@ -90,7 +93,13 @@ public enum WindowsCore {
     /// Opens the design in `folder`, a .bezzle package: its document.json, and its pictures in
     /// images/, by their file names, as the core asks for them. Answers its artboards.
     public static func open(_ folder: URL) throws -> [Board] {
-        let doc = try read(folder)
+        nextRasterPackage += 1
+        let package = nextRasterPackage
+        let doc: BezzleDocument
+        do { doc = try read(folder, package: package) }
+        catch { bz_asset_close_package(package); throw error }
+        bz_asset_close_package(rasterPackage)
+        rasterPackage = package
         typing = nil
         versions.reset()
         timeTable.forget()
@@ -129,12 +138,14 @@ public enum WindowsCore {
         Editing.gestureStart = nil
         Editing.gestureBase = nil
         assets = Assets(folder: nil)
+        bz_asset_close_package(rasterPackage)
+        rasterPackage = 0
     }
 
     /// A design's document as its file has it, its pictures given to Skia by their file names
     /// (each picture's own UUID): a package with its document.json, or a design from before
     /// pictures, one JSON file. Nothing that is open changes.
-    static func read(_ folder: URL) throws -> BezzleDocument {
+    static func read(_ folder: URL, package: UInt64 = 0) throws -> BezzleDocument {
         var isFolder: ObjCBool = false
         _ = FileManager.default.fileExists(atPath: folder.path, isDirectory: &isFolder)
         let json = isFolder.boolValue ? folder.appendingPathComponent("document.json") : folder
@@ -144,7 +155,7 @@ public enum WindowsCore {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: images.path)) ?? []
         for name in names {
             let data = try Data(contentsOf: images.appendingPathComponent(name))
-            giveSkia(name, data, fromPackage: true)
+            giveSkia(name, data, fromPackage: true, package: package)
         }
         // Pictures from the relay that wait beside a design in a synced folder (`arrivals`).
         let waiting = arrivals.images(of: folder)

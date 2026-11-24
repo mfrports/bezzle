@@ -20,9 +20,9 @@ extension WindowsCore {
 
     /// Gives Skia one of a design's pictures by name, as its file's bytes; an HEIC picture Windows
     /// cannot read is noted. JPEGs from a package are decoded when their pixels are first needed.
-    static func giveSkia(_ name: String, _ data: Data, fromPackage: Bool = false) {
+    static func giveSkia(_ name: String, _ data: Data, fromPackage: Bool = false, package: UInt64 = 0) {
         let added = data.withUnsafeBytes { bytes in
-            if fromPackage { return bz_asset_add_from_package(name, bytes.baseAddress, Int32(bytes.count)) != 0 }
+            if fromPackage { return bz_asset_add_from_package(name, bytes.baseAddress, Int32(bytes.count), package) != 0 }
             return bz_asset_add(name, bytes.baseAddress, Int32(bytes.count)) != 0
         }
         if added {

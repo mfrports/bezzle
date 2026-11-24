@@ -56,6 +56,7 @@ extension WindowsCore {
         v.visit(&sceneLooks)
         v.visit(&design)
         v.visit(&assets)
+        v.visit(&rasterPackage)
         v.visit(&previewBase)
         v.visit(&fronts)
         v.visit(&showingVersion)
