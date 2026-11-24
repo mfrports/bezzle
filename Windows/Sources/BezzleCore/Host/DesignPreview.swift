@@ -175,9 +175,13 @@ nonisolated enum DesignPreview {
     /// newer than its last save. With `keepingDate`, as for a design caught up on from the home
     /// screen, the date stays, and the design keeps its place among the others there.
     @MainActor static func write(_ doc: BezzleDocument, assets: Assets?, to design: URL, keepingDate: Bool = false) {
+        store(jpeg(of: doc, assets: assets), in: design, keepingDate: keepingDate)
+    }
+
+    static func store(_ preview: @autoclosure () -> Data?, in design: URL, keepingDate: Bool) {
         var isFolder: ObjCBool = false
         guard FileManager.default.fileExists(atPath: design.path, isDirectory: &isFolder), isFolder.boolValue else { return }
-        let data = jpeg(of: doc, assets: assets)
+        let data = preview()
         let fm = FileManager.default
         let folder = design.appendingPathComponent(folderName, isDirectory: true), file = file(of: design)
         let date = (try? fm.attributesOfItem(atPath: design.path))?[.modificationDate] as? Date

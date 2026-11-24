@@ -18,11 +18,16 @@ import WinSDK
 /// side are, never hand over to each other, nor do two people signed in at once, while every start
 /// of one installed copy finds the one that runs.
 enum HandOver {
-    /// This Bezzle.exe as it is told from others: its path, lower case, as a 64-bit FNV-1a hash.
-    static let name: String = {
+    private static let executablePath: String = {
         var buffer = [UInt16](repeating: 0, count: 32768)
         let count = Int(GetModuleFileNameW(nil, &buffer, DWORD(buffer.count)))
-        let path = String(decoding: buffer[0..<count], as: UTF16.self).lowercased()
+        return String(decoding: buffer[0..<count], as: UTF16.self)
+    }()
+    static let executable = URL(fileURLWithPath: executablePath)
+
+    /// This Bezzle.exe as it is told from others: its path, lower case, as a 64-bit FNV-1a hash.
+    static let name: String = {
+        let path = executablePath.lowercased()
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in path.utf8 {
             hash ^= UInt64(byte)
@@ -41,6 +46,12 @@ enum HandOver {
 
     /// Held for as long as this copy runs, telling later starts that it does.
     nonisolated(unsafe) private static var mutex: HANDLE?
+    private static let gate = NSLock()
+    nonisolated(unsafe) private static var accepting = true
+
+    static func stopAccepting() {
+        gate.withLock { accepting = false }
+    }
 
     /// What one start hands to the other.
     private struct Message: Codable {
@@ -64,6 +75,9 @@ enum HandOver {
     /// may not listen yet; it is waited for a few seconds, and if it never answers, this one runs
     /// after all.
     static func pass(_ arguments: [String]) -> Bool {
+        if arguments.first == SavedPreviewWorker.command {
+            exit(MainActor.assumeIsolated { SavedPreviewWorker.run(arguments) })
+        }
         mutex = "Local\\Bezzle-\(name)".withCString(encodedAs: UTF16.self) { CreateMutexW(nil, true, $0) }
         guard GetLastError() == alreadyExists else { return false }
         let message = Message(folder: FileManager.default.currentDirectoryPath, arguments: arguments)
@@ -80,8 +94,12 @@ enum HandOver {
                 if GetNamedPipeServerProcessId(pipe, &server) { _ = AllowSetForegroundWindow(DWORD(server)) }
                 var length = UInt32(body.count).littleEndian
                 let header = withUnsafeBytes(of: &length) { Array($0) }
-                guard write(pipe, header + [UInt8](body)), read(pipe, 1) != nil else { return false }
-                return true
+                guard write(pipe, header + [UInt8](body)), let reply = read(pipe, 1) else { return false }
+                if reply == [1] { return true }
+                // The previous copy has saved its designs and is finishing its previews.
+                // Open in this copy once it is out of the way.
+                if let mutex { _ = WaitForSingleObject(mutex, 4000) }
+                return false
             }
             let error = GetLastError()
             if error == pipeBusy {
@@ -117,8 +135,10 @@ enum HandOver {
                     if length <= 1 << 20, let body = read(pipe, length) {
                         message = try? JSONDecoder().decode(Message.self, from: Data(body))
                     }
-                    // Said back once read, so the other start may go.
-                    _ = write(pipe, [1])
+                    // Refuse handovers once shutdown begins so they open in the next copy.
+                    let willOpen = gate.withLock { accepting }
+                    if !willOpen { message = nil }
+                    _ = write(pipe, [willOpen ? 1 : 0])
                     FlushFileBuffers(pipe)
                 }
                 DisconnectNamedPipe(pipe)

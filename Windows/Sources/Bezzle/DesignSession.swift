@@ -299,7 +299,7 @@ final class DesignSession {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.previewTimer = nil
-                // It is drawn on the main thread here, so not in the middle of a drag: once it ends.
+                // Wait until the edit is settled before asking for a preview of the package.
                 let dragging = self.slot.isOpen && WindowsCore.using(self.slot) { WindowsCore.inGesture }
                 if dragging {
                     self.previewTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
@@ -319,8 +319,25 @@ final class DesignSession {
         previewTimer = nil
         guard slot.isOpen else { return }
         WindowsCore.using(slot) {
-            guard previewed != WindowsCore.designChanges else { return }
-            previewed = WindowsCore.designChanges
+            let change = WindowsCore.designChanges
+            guard previewed != change else { return }
+            if let revision = WindowsCore.savedPreview {
+                guard !savePending, unsaved == nil else { return }
+                SavedPreviews.shared.enqueue(revision) { [weak self] kept in
+                    guard let self, self.slot.isOpen else { return }
+                    WindowsCore.using(self.slot) {
+                        guard WindowsCore.designChanges == change else { return }
+                        if kept || WindowsCore.savedPreview == revision {
+                            // A failed render keeps the old thumbnail. Try again after another edit.
+                            self.previewed = change
+                        } else {
+                            self.schedulePreview()
+                        }
+                    }
+                }
+                return
+            }
+            previewed = change
             WindowsCore.writePreview()
         }
     }
