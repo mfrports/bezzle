@@ -25,13 +25,7 @@ final class HomeView {
     var openShareLink: ((String) -> Void)?
     /// What home's search looks for among the designs' names.
     private var query = ""
-    /// The designs' pictures drawn so far, by design, size and when it was last changed.
-    private var pictures: [String: WriteableBitmap] = [:]
-    /// Designs looked at for a picture for a Mac's Finder since Bezzle started, and those still to
-    /// be looked at, one after another while home is in front (the Mac's Library.seekPreview).
-    private var previewsSought: Set<URL> = []
-    private var previewsToSeek: [URL] = []
-    private var seeking: Timer?
+    let previews = HomePreviews()
     private let folder: URL
     private let open: (URL) -> Void
     private let page = StackPanel()
@@ -68,9 +62,13 @@ final class HomeView {
         root.children.append(scroll)
         root.loaded.addHandler { [weak self] _, _ in
             guard let self else { return }
-            self.pixelScale = self.root.xamlRoot?.rasterizationScale ?? 1
+            let scale = self.root.xamlRoot?.rasterizationScale ?? 1
+            if self.pixelScale != scale { self.shownWidth = 0 }
+            self.pixelScale = scale
             self.showDesigns()
+            self.previews.resume()
         }
+        root.unloaded.addHandler { [weak self] _, _ in self?.previews.pause() }
         root.sizeChanged.addHandler { [weak self] _, _ in self?.showDesigns() }
         try? Grid.setRowSpan(menus.layer, 2)
         root.children.append(menus.layer)
@@ -461,17 +459,19 @@ final class HomeView {
         let width = min(1240, max(300, root.actualWidth - 80))
         guard abs(width - shownWidth) > 1 else { return }
         shownWidth = width
+        previews.clearCards()
         designs.children.clear()
         designs.spacing = 24
         let urls = ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
             .filter { $0.pathExtension == "bezzle" }
             .filter { query.isEmpty || $0.deletingPathExtension().lastPathComponent.localizedCaseInsensitiveContains(query) }
-            .sorted { (date($0) ?? .distantPast) > (date($1) ?? .distantPast) }
+            .map { (url: $0, version: HomePreviews.version(of: $0)) }
+            .sorted { ($0.version ?? .distantPast) > ($1.version ?? .distantPast) }
         let columns = max(1, Int((width + 22) / (220 + 22)))
         let tile = (width - Double(columns - 1) * 22) / Double(columns)
         var row: StackPanel?
         // Designs on their way from a link come first, where they will be (Links.swift).
-        let cards = ShareHome.arrivalCards(width: tile) + urls.map { card($0, width: tile) }
+        let cards = ShareHome.arrivalCards(width: tile) + urls.map { card($0.url, width: tile, version: $0.version) }
         for (k, card) in cards.enumerated() {
             if k % columns == 0 {
                 let r = StackPanel()
@@ -482,40 +482,10 @@ final class HomeView {
             }
             row?.children.append(card)
         }
+        previews.startNext()
     }
 
-    /// A design on home without a current picture for a Mac's Finder, made before Bezzle kept them,
-    /// brought in from elsewhere or changed while closed, is given one, keeping its date; one open
-    /// in a tab makes its own as it is worked on (the Mac's Library.seekPreview). They are drawn on
-    /// the main thread here, so one at a time, a moment apart, while home is in front.
-    private func seekPreview(_ url: URL) {
-        guard previewsSought.insert(url.standardizedFileURL).inserted else { return }
-        previewsToSeek.append(url)
-        guard seeking == nil else { return }
-        seeking = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.seekNextPreview() }
-        }
-    }
-
-    private func seekNextPreview() {
-        guard Tabs.shared.selected == nil else { return }
-        guard !previewsToSeek.isEmpty else {
-            seeking?.invalidate()
-            seeking = nil
-            return
-        }
-        let url = previewsToSeek.removeFirst()
-        guard Tabs.shared.tab(showing: url) == nil, FileManager.default.fileExists(atPath: url.path) else { return }
-        WindowsCore.catchUpPreview(of: url)
-    }
-
-    private func date(_ url: URL) -> Date? {
-        let document = url.appendingPathComponent("document.json")
-        return (try? document.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            ?? (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-    }
-
-    private func card(_ url: URL, width: Double) -> UIElement {
+    private func card(_ url: URL, width: Double, version: Date?) -> UIElement {
         let column = StackPanel()
         column.spacing = 10
         column.width = width
@@ -530,28 +500,8 @@ final class HomeView {
         image.stretch = .uniformToFill
         image.verticalAlignment = .top
         frame.child = image
-        // Drawn once the page shows, one after another, so home comes up at once; kept for when
-        // the list is made again (a search, say) while the design and the size are as they were.
-        let scale = pixelScale
-        let key = "\(url.path)|\(Int(width))|\(date(url)?.timeIntervalSince1970 ?? 0)"
-        if let kept = pictures[key] {
-            image.source = kept
-        } else {
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    var bitmap: WriteableBitmap?
-                    _ = WindowsCore.thumbnail(of: url, width: width, height: width * 300 / 480, scale: scale) { w, h in
-                        bitmap = WriteableBitmap(Int32(w), Int32(h))
-                        return (try? bitmap?.pixelBuffer.buffer).flatMap { $0.map(UnsafeMutableRawPointer.init) }
-                    }
-                    try? bitmap?.invalidate()
-                    image.source = bitmap
-                    if let bitmap { self.pictures[key] = bitmap }
-                }
-            }
-        }
+        previews.show(image, for: url, version: version, width: width, scale: pixelScale)
         column.children.append(frame)
-        seekPreview(url)
         let name = Theme.text(url.deletingPathExtension().lastPathComponent, size: 15, serif: true)
         column.children.append(name)
         // How it is shared, under its name.
