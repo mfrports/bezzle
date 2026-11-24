@@ -183,8 +183,17 @@ struct Asset {
 };
 std::vector<Asset> assets;                      // by number - 1
 std::map<std::string, int> assetsByName;
+std::map<std::string, sk_sp<SkImage>> pendingJPEGs;
 /// The pictures shown by a glimpse of them until they come (bz_asset_stand_in).
 std::set<std::string> standIns;
+
+int keepAsset(const std::string& name, Asset asset) {
+    assets.push_back(std::move(asset));
+    const int number = int(assets.size());
+    assetsByName[name] = number;
+    standIns.erase(name);
+    return number;
+}
 
 /// What an AVIF file's colours mean, as the Mac's Image I/O reads them: by its ICC profile when it
 /// has one, else by its numbers (ITU-T H.273). Unspecified reads as sRGB, and so does the video
@@ -339,13 +348,23 @@ sk_sp<SkImage> heifPicture(const void* data, size_t count, bool upright, OwnColo
     return upright ? turned(image, SkEncodedOrigin(std::clamp(p.orientation, 1, 8))) : image;
 }
 
-sk_sp<SkImage> decode(const void* data, size_t count) {
+void registerImageDecoders() {
     static std::once_flag registered;
     std::call_once(registered, [] {
         SkCodecs::Register(SkPngDecoder::Decoder());
         SkCodecs::Register(SkJpegDecoder::Decoder());
         SkCodecs::Register(SkWebpDecoder::Decoder());
     });
+}
+
+sk_sp<SkImage> rasterWithMipmaps(const sk_sp<SkImage>& image) {
+    // With mipmaps, as the page makes them, for pictures drawn smaller.
+    auto raster = image ? image->makeRasterImage(nullptr) : nullptr;
+    return raster ? raster->withDefaultMipmaps() : nullptr;
+}
+
+sk_sp<SkImage> decode(const void* data, size_t count) {
+    registerImageDecoders();
     if (!data || !count) return nullptr;
     // Upright, as the Mac reads a design's pictures (Canvas/Assets.swift, with the transform).
     if (avif::sniff(data, count)) {
@@ -356,10 +375,7 @@ sk_sp<SkImage> decode(const void* data, size_t count) {
         auto image = heifPicture(data, count, true);
         return image ? image->withDefaultMipmaps() : nullptr;
     }
-    auto image = SkImages::DeferredFromEncodedData(SkData::MakeWithCopy(data, count));
-    // With mipmaps, as the page makes them, for pictures drawn smaller.
-    auto raster = image ? image->makeRasterImage(nullptr) : nullptr;
-    return raster ? raster->withDefaultMipmaps() : nullptr;
+    return rasterWithMipmaps(SkImages::DeferredFromEncodedData(SkData::MakeWithCopy(data, count)));
 }
 
 extern "C" int32_t bz_image_size(const void* data, int32_t count, int32_t* width, int32_t* height) {
@@ -377,7 +393,7 @@ extern "C" int32_t bz_image_size(const void* data, int32_t count, int32_t* width
         *height = h;
         return 1;
     }
-    decode(nullptr, 0);  // the decoders, registered once
+    registerImageDecoders();
     auto codec = SkCodec::MakeFromData(SkData::MakeWithoutCopy(data, size_t(count)));
     if (!codec) return 0;
     const auto d = codec->dimensions();
@@ -408,7 +424,7 @@ extern "C" int32_t bz_image_pixel_size(const void* data, int64_t count, int32_t*
         *height = h;
         return 1;
     }
-    decode(nullptr, 0);
+    registerImageDecoders();
     auto codec = SkCodec::MakeFromData(SkData::MakeWithoutCopy(data, size_t(count)));
     if (!codec) return 0;
     const auto d = codec->dimensions();
@@ -431,7 +447,7 @@ extern "C" int32_t bz_image_decode(const void* data, int64_t count, int32_t widt
         const SkImageInfo info = SkImageInfo::Make(width, height, kRGBA_8888_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB());
         return image->readPixels(nullptr, info, pixels, size_t(width) * 4, 0, 0) ? 0 : 2;
     }
-    decode(nullptr, 0);
+    registerImageDecoders();
     auto codec = SkCodec::MakeFromData(SkData::MakeWithoutCopy(data, size_t(count)));
     if (!codec || codec->dimensions().width() != width || codec->dimensions().height() != height) return 1;
     const SkImageInfo info = SkImageInfo::Make(width, height, kRGBA_8888_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB());
@@ -482,7 +498,7 @@ int32_t thumbnail(const void* data, int64_t count, int32_t longest, int32_t* wid
         source = heifPicture(data, size_t(count), true, colors ? &own : nullptr);
         if (source) kept = source->dimensions();
     } else {
-        decode(nullptr, 0);
+        registerImageDecoders();
         auto codec = SkCodec::MakeFromData(SkData::MakeWithoutCopy(data, size_t(count)));
         if (!codec) return 0;
         origin = codec->getOrigin();
@@ -581,10 +597,20 @@ extern "C" int32_t bz_heif_sniff(const void* data, int64_t count) { return heif:
 
 extern "C" int32_t bz_heif_problem(void) { return int32_t(heif::lastProblem()); }
 
+void loadPendingJPEG(const std::string& name) {
+    if (auto pending = pendingJPEGs.find(name); pending != pendingJPEGs.end()) {
+        auto image = rasterWithMipmaps(pending->second);
+        pendingJPEGs.erase(pending);
+        // If decoding fails, keep any image or glimpse already registered under this name.
+        if (image) keepAsset(name, Asset{std::move(image)});
+    }
+}
+
 /// A picture by name: its number, width and height, or 0 when there is none (bezzle.mjs's image).
 std::vector<double> imageByName(const double* v, size_t n) {
     std::string name;
     for (size_t i = 0; i < n; i++) name.push_back(char(int(v[i])));
+    loadPendingJPEG(name);
     auto it = assetsByName.find(name);
     if (it == assetsByName.end()) {
         if (tracing()) fprintf(stderr, "[host] no asset %s\n", name.c_str());
@@ -2662,8 +2688,9 @@ extern "C" void bz_text_forget(void) {
     glyphLines.clear();
 }
 
-extern "C" int32_t bz_asset_add(const char* name, const void* data, int32_t count) {
-    std::lock_guard<std::mutex> guard(lock);
+namespace {
+
+int32_t addAsset(const char* name, const void* data, int32_t count) {
     auto image = decode(data, size_t(count));
     if (!image) return 0;
     Asset asset{image};
@@ -2671,17 +2698,38 @@ extern "C" int32_t bz_asset_add(const char* name, const void* data, int32_t coun
         const auto* bytes = static_cast<const uint8_t*>(data);
         asset.avifFile = std::make_shared<std::vector<uint8_t>>(bytes, bytes + count);
     }
-    assets.push_back(std::move(asset));
-    const int number = int(assets.size());
-    assetsByName[name] = number;
-    // The picture itself, come in place of its glimpse.
-    standIns.erase(name);
-    return number;
+    pendingJPEGs.erase(name);
+    return keepAsset(name, std::move(asset));
+}
+
+}
+
+extern "C" int32_t bz_asset_add(const char* name, const void* data, int32_t count) {
+    std::lock_guard<std::mutex> guard(lock);
+    return addAsset(name, data, count);
+}
+
+extern "C" int32_t bz_asset_add_from_package(const char* name, const void* data, int32_t count) {
+    if (!data || count <= 0) return 0;
+    std::lock_guard<std::mutex> guard(lock);
+    if (!SkJpegDecoder::IsJpeg(data, size_t(count))) return addAsset(name, data, count) != 0;
+    if (auto pending = pendingJPEGs.find(name); pending != pendingJPEGs.end()) {
+        auto bytes = pending->second->refEncodedData();
+        if (bytes && bytes->size() == size_t(count) && std::memcmp(bytes->data(), data, size_t(count)) == 0) return 1;
+        // Only replace an earlier pending JPEG if its replacement can be decoded.
+        return addAsset(name, data, count) != 0;
+    }
+    registerImageDecoders();
+    auto image = SkImages::DeferredFromEncodedData(SkData::MakeWithCopy(data, size_t(count)));
+    if (!image) return 0;
+    pendingJPEGs.emplace(name, std::move(image));
+    return 1;
 }
 
 extern "C" int32_t bz_asset_stand_in(const char* name, const void* data, int32_t count, int32_t longest) {
     std::lock_guard<std::mutex> guard(lock);
     // The picture itself is here already.
+    loadPendingJPEG(name);
     if (assetsByName.count(name) && !standIns.count(name)) return 0;
     auto small = decode(data, size_t(count));
     if (!small || longest <= 0) return 0;

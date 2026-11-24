@@ -144,7 +144,7 @@ public enum WindowsCore {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: images.path)) ?? []
         for name in names {
             let data = try Data(contentsOf: images.appendingPathComponent(name))
-            giveSkia(name, data)
+            giveSkia(name, data, fromPackage: true)
         }
         // Pictures from the relay that wait beside a design in a synced folder (`arrivals`).
         let waiting = arrivals.images(of: folder)
