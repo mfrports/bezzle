@@ -182,10 +182,19 @@ struct Asset {
     sk_sp<SkImage> developFrom;
     // The current package JPEG's bytes, to recognize the same picture on another read.
     sk_sp<const SkData> packageJPEG;
+    // Encoded backing for a package picture whose decoded pixels can be dropped.
+    sk_sp<SkImage> packageSource;
+    std::set<uint64_t> packages;
+    bool releaseWhenUnused = false;
+};
+struct PendingJPEG {
+    sk_sp<SkImage> source;
+    std::set<uint64_t> packages;
+    bool releaseWhenUnused = false;
 };
 std::vector<Asset> assets;                      // by number - 1
 std::map<std::string, int> assetsByName;
-std::map<std::string, sk_sp<SkImage>> pendingJPEGs;
+std::map<std::string, PendingJPEG> pendingJPEGs;
 /// The pictures shown by a glimpse of them until they come (bz_asset_stand_in).
 std::set<std::string> standIns;
 
@@ -605,11 +614,16 @@ extern "C" int32_t bz_heif_problem(void) { return int32_t(heif::lastProblem()); 
 
 void loadPendingJPEG(const std::string& name) {
     if (auto pending = pendingJPEGs.find(name); pending != pendingJPEGs.end()) {
-        Asset asset{rasterWithMipmaps(pending->second)};
-        if (asset.image) asset.packageJPEG = pending->second->refEncodedData();
+        auto entry = std::move(pending->second);
         pendingJPEGs.erase(pending);
+        Asset asset{rasterWithMipmaps(entry.source)};
         // If decoding fails, keep any image or glimpse already registered under this name.
-        if (asset.image) keepAsset(name, std::move(asset));
+        if (!asset.image) return;
+        asset.packageJPEG = entry.source->refEncodedData();
+        asset.packageSource = std::move(entry.source);
+        asset.packages = std::move(entry.packages);
+        asset.releaseWhenUnused = entry.releaseWhenUnused;
+        keepAsset(name, std::move(asset));
     }
 }
 
@@ -623,7 +637,9 @@ std::vector<double> imageByName(const double* v, size_t n) {
         if (tracing()) fprintf(stderr, "[host] no asset %s\n", name.c_str());
         return {0};
     }
-    const auto& image = assets[it->second - 1].image;
+    const auto& asset = assets[it->second - 1];
+    const auto& image = asset.image ? asset.image : asset.packageSource;
+    if (!image) return {0};
     return {double(it->second), double(image->width()), double(image->height())};
 }
 
@@ -973,8 +989,13 @@ sk_sp<SkImage> developed(const sk_sp<SkImage>& from, const Picture& d) {
 
 sk_sp<SkImage> make(const Picture& d) {
     switch (d.kind) {
-        case Picture::kAsset:
-            return d.asset > 0 && size_t(d.asset) <= assets.size() ? assets[d.asset - 1].image : nullptr;
+        case Picture::kAsset: {
+            if (d.asset <= 0 || size_t(d.asset) > assets.size()) return nullptr;
+            auto& asset = assets[d.asset - 1];
+            // All callers of get hold lock, including playback, exports and film frames.
+            if (!asset.image && asset.packageSource) asset.image = rasterWithMipmaps(asset.packageSource);
+            return asset.image;
+        }
         case Picture::kRecording:
             return raster(d.width, d.height, [&](SkCanvas* canvas) {
                 // Core Graphics' space: y up from the bottom left.
@@ -1057,7 +1078,8 @@ sk_sp<SkImage> get(int id) {
         return nullptr;
     }
     auto image = make(it->second);
-    made[id] = image;
+    // Native asset records already cache their decoded pixels.
+    if (it->second.kind != Picture::kAsset) made[id] = image;
     return image;
 }
 
@@ -2697,10 +2719,15 @@ extern "C" void bz_text_forget(void) {
 
 namespace {
 
-int32_t addAsset(const char* name, const void* data, int32_t count) {
-    auto image = decode(data, size_t(count));
+int32_t addAsset(const char* name, const void* data, int32_t count, sk_sp<SkImage> backing = nullptr, uint64_t package = 0) {
+    auto image = backing ? rasterWithMipmaps(backing) : decode(data, size_t(count));
     if (!image) return 0;
     Asset asset{image};
+    asset.packageSource = std::move(backing);
+    if (asset.packageSource && package) {
+        asset.packages.insert(package);
+        asset.releaseWhenUnused = true;
+    }
     if (avif::sniff(data, size_t(count))) {
         const auto* bytes = static_cast<const uint8_t*>(data);
         asset.avifFile = std::make_shared<std::vector<uint8_t>>(bytes, bytes + count);
@@ -2716,27 +2743,68 @@ extern "C" int32_t bz_asset_add(const char* name, const void* data, int32_t coun
     return addAsset(name, data, count);
 }
 
-extern "C" int32_t bz_asset_add_from_package(const char* name, const void* data, int32_t count) {
+extern "C" int32_t bz_asset_add_from_package(const char* name, const void* data, int32_t count, uint64_t package) {
     if (!data || count <= 0) return 0;
     std::lock_guard<std::mutex> guard(lock);
-    if (!SkJpegDecoder::IsJpeg(data, size_t(count))) return addAsset(name, data, count) != 0;
+    const auto size = size_t(count);
+    const bool jpeg = SkJpegDecoder::IsJpeg(data, size);
     const auto matches = [&](const sk_sp<const SkData>& bytes) {
-        return bytes && bytes->size() == size_t(count) && std::memcmp(bytes->data(), data, size_t(count)) == 0;
+        return bytes && bytes->size() == size && std::memcmp(bytes->data(), data, size) == 0;
     };
-    if (auto found = assetsByName.find(name); found != assetsByName.end() && matches(assets[found->second - 1].packageJPEG)) {
-        pendingJPEGs.erase(name);
-        return 1;
+    if (auto found = assetsByName.find(name); found != assetsByName.end()) {
+        auto& asset = assets[found->second - 1];
+        const auto bytes = jpeg ? asset.packageJPEG : asset.packageSource ? asset.packageSource->refEncodedData() : nullptr;
+        if (matches(bytes)) {
+            if (package) {
+                asset.packages.insert(package);
+                asset.releaseWhenUnused = true;
+            }
+            pendingJPEGs.erase(name);
+            return 1;
+        }
     }
-    if (auto pending = pendingJPEGs.find(name); pending != pendingJPEGs.end()) {
-        if (matches(pending->second->refEncodedData())) return 1;
-        // Only replace an earlier pending JPEG if its replacement can be decoded.
+    if (!jpeg) {
+        if (package && (SkPngDecoder::IsPng(data, size) || SkWebpDecoder::IsWebp(data, size))) {
+            registerImageDecoders();
+            auto backing = SkImages::DeferredFromEncodedData(SkData::MakeWithCopy(data, size));
+            return backing && addAsset(name, data, count, std::move(backing), package) != 0;
+        }
         return addAsset(name, data, count) != 0;
     }
     registerImageDecoders();
-    auto image = SkImages::DeferredFromEncodedData(SkData::MakeWithCopy(data, size_t(count)));
+    if (auto pending = pendingJPEGs.find(name); pending != pendingJPEGs.end()) {
+        if (matches(pending->second.source->refEncodedData())) {
+            if (package) {
+                pending->second.packages.insert(package);
+                pending->second.releaseWhenUnused = true;
+            }
+            return 1;
+        }
+        // Only replace an earlier pending JPEG if its replacement can be decoded.
+        auto backing = SkImages::DeferredFromEncodedData(SkData::MakeWithCopy(data, size));
+        return backing && addAsset(name, data, count, std::move(backing), package) != 0;
+    }
+    auto image = SkImages::DeferredFromEncodedData(SkData::MakeWithCopy(data, size));
     if (!image) return 0;
-    pendingJPEGs.emplace(name, std::move(image));
+    PendingJPEG pending{std::move(image)};
+    if (package) {
+        pending.packages.insert(package);
+        pending.releaseWhenUnused = true;
+    }
+    pendingJPEGs.emplace(name, std::move(pending));
     return 1;
+}
+
+extern "C" void bz_asset_close_package(uint64_t package) {
+    if (!package) return;
+    std::lock_guard<std::mutex> guard(lock);
+    for (auto& asset : assets) {
+        asset.packages.erase(package);
+        // Older picture numbers can still be drawn by another tab. Drop their restored pixels
+        // again on the next close if no open package registered them.
+        if (asset.releaseWhenUnused && asset.packages.empty()) asset.image.reset();
+    }
+    for (auto& [name, pending] : pendingJPEGs) pending.packages.erase(package);
 }
 
 extern "C" int32_t bz_asset_stand_in(const char* name, const void* data, int32_t count, int32_t longest) {
@@ -2951,9 +3019,14 @@ extern "C" int32_t bz_film_frame(int32_t width, int32_t height, const double* ba
         if (auto it = mipped.find(p.picture); it != mipped.end()) {
             image = it->second;
         } else if (auto drawn = get(p.picture)) {
-            image = drawn->withDefaultMipmaps();
-            if (!image) image = drawn;
-            mipped[p.picture] = image;
+            if (auto it = pictures.find(p.picture); it != pictures.end() && it->second.kind == Picture::kAsset) {
+                // Asset rasters already have mipmaps and their lifetime follows their packages.
+                image = drawn;
+            } else {
+                image = drawn->withDefaultMipmaps();
+                if (!image) image = drawn;
+                mipped[p.picture] = image;
+            }
         }
         if (image) laid.push_back({image, &p});
     }
