@@ -161,5 +161,11 @@ What every session here keeps to (Erik's rules, gathered from many sessions):
   `main` or force-pushing to it and takes changes only through a pull request approved after its
   last push (since 2026-11-20), Erik as admin excepted, so his pushes and releases go on as before.
   A contributor's work is read, built and tried in the VM before it comes onto `main`, keeping its
-  author. Issues are open to everyone.
+  author: several pull requests merged together on a scratch branch, built and tried as one, then
+  merged on GitHub with merge commits (`gh pr merge <n> --merge --admin`). A stack (a pull request
+  based on another's branch) refuses that and `gh pr edit --base`: merge it bottom-most first with
+  `gh api -X PUT repos/mfrports/bezzle/pulls/<n>/merge-async -H "X-GitHub-Api-Version: 2026-03-10"
+  -f merge_method=merge -f merge_action=direct_merge -F bypass_rules=true`, and wait for each
+  (`…/merge-async/<uuid>`) before the next (2026-11-24). A draft stays open. Issues are open to
+  everyone.
 
