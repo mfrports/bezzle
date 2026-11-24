@@ -489,12 +489,14 @@ final class Library {
         Task.detached(priority: .userInitiated) {
             let doc = try? DesignFile.read(url)
             let assets = doc.map { Assets.previews(Self.pictureSizes(in: $0, thumbnail: size, scale: 2), design: url) }
-            await Library.shared.finishThumbnail(url, modified: modified, doc: doc, assets: assets, size: size)
+            // Drawn here as well, off the main thread: a large design takes a while to draw, and
+            // the home screen goes on answering meanwhile.
+            let image = doc.flatMap { Renderer.thumbnail(of: $0, size: size, assets: assets, cover: true) }
+            await Library.shared.finishThumbnail(url, modified: modified, image: image)
         }
     }
 
-    private func finishThumbnail(_ url: URL, modified: Date, doc: BezzleDocument?, assets: Assets?, size: CGSize) {
-        let image = doc.flatMap { Renderer.thumbnail(of: $0, size: size, assets: assets, cover: true) }
+    private func finishThumbnail(_ url: URL, modified: Date, image: CGImage?) {
         making.remove(url)
         thumbnails[url] = (modified, image)
         if let image { Self.keep(image, for: url, modified: modified) }

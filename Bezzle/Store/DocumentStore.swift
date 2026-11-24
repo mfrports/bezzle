@@ -707,9 +707,12 @@ final class DocumentStore {
         // Nowhere to be found, it is written again where it was, so that nothing done is lost; in
         // a synced folder only once it has stayed away a while (`lost`).
         let url = url, creating = !inSyncedFolder && !DesignFile.exists(url)
+        // Saved with nothing changed (on closing, say), a design on this Mac alone keeps its file
+        // and its date, rather than being written whole again. A shared one is written as before.
+        let keepingSame = sharing == nil && !inSyncedFolder
         Self.saving.async { [copy] in
             do {
-                try DesignFile.write(copy, to: url, creating: creating)
+                try DesignFile.write(copy, to: url, creating: creating, keepingSame: keepingSame)
                 Self.unwritten[url] = nil
             } catch is DesignFile.Gone {
                 // It went in the moment since: saved again where it went, once found.

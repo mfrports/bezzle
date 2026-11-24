@@ -66,8 +66,9 @@ nonisolated enum DesignFile {
 
     /// Saves over what is there, in the form it already has; a new design becomes a package.
     /// Not `creating`, a design that is not there throws `Gone` instead, as for an open design
-    /// whose file went while it was being saved.
-    static func write(_ doc: BezzleDocument, to url: URL, creating: Bool = true) throws {
+    /// whose file went while it was being saved. `keepingSame`, a file that has these very bytes
+    /// already is left as it is, with the date it was last changed.
+    static func write(_ doc: BezzleDocument, to url: URL, creating: Bool = true, keepingSame: Bool = false) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(doc)
@@ -75,14 +76,17 @@ nonisolated enum DesignFile {
             // Asked once the folder's sync service has let go of it: while it puts in place what
             // another computer wrote, the design may be away for a moment.
             if !creating, !exists(url) { throw Gone() }
+            let file: URL
             if isPackage(url) {
-                try data.write(to: url.appendingPathComponent(documentName), options: .atomic)
+                file = url.appendingPathComponent(documentName)
             } else if FileManager.default.fileExists(atPath: url.path) {
-                try data.write(to: url, options: .atomic)
+                file = url
             } else {
                 try FileManager.default.createDirectory(at: url.appendingPathComponent(imagesFolder, isDirectory: true), withIntermediateDirectories: true)
-                try data.write(to: url.appendingPathComponent(documentName), options: .atomic)
+                file = url.appendingPathComponent(documentName)
             }
+            if keepingSame, (try? Data(contentsOf: file)) == data { return }
+            try data.write(to: file, options: .atomic)
         }
     }
 
