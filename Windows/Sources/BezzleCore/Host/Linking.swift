@@ -73,9 +73,9 @@ enum Linking {
 
     // MARK: The design's link, in its package
 
-    private static func linkFile(_ design: URL) -> URL { FolderShare.sharing(of: design).appendingPathComponent("share.json") }
+    nonisolated private static func linkFile(_ design: URL) -> URL { FolderShare.sharing(of: design).appendingPathComponent("share.json") }
 
-    static func link(of design: URL) -> ShareLink? {
+    nonisolated static func link(of design: URL) -> ShareLink? {
         (try? Data(contentsOf: linkFile(design))).flatMap { FolderShare.decode(ShareLink.self, from: $0) }
     }
 

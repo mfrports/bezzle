@@ -102,6 +102,7 @@ final class DesignTab {
     private(set) var view: DesignWindow?
     /// What shows instead while it comes in from another app, or when it could not be opened.
     private var message: MessagePage?
+    fileprivate var opening: Task<Void, Never>?
     /// Whether its name is being typed anew, in its tab.
     var renaming = false
     /// What the window does when a tab's page changes (a design brought in has arrived).
@@ -137,43 +138,62 @@ final class DesignTab {
 
     /// Opens the file. One from Adobe XD, Figma, Sketch or Photoshop is brought in as a new design
     /// in the designs folder, which the tab then shows; the file itself is left as it is.
-    fileprivate func load(report: WindowsCore.ImportSummary? = nil) {
+    fileprivate func load(report: WindowsCore.ImportSummary? = nil) async {
         if WindowsCore.imports(url) {
-            bringIn()
+            let source = url
+            message = MessagePage(title: Words.t("Bringing in %@…", source.lastPathComponent), detail: "")
+            pageChanged()
+            do {
+                try await Task.sleep(for: .milliseconds(80))
+                try Task.checkCancellation()
+                let (made, summary) = try WindowsCore.importDesign(source, into: BezzleApp.designsFolder)
+                url = made
+                do {
+                    install(try WindowsCore.openSlot(made), report: summary)
+                } catch {
+                    showOpenError(error)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                let why = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+                message = MessagePage(title: Words.t("Bezzle could not bring in the file"), detail: "\(source.lastPathComponent): \(why)")
+            }
             return
         }
-        do {
-            let slot = try WindowsCore.openSlot(url)
-            let view = DesignWindow(slot: slot)
-            Tabs.shared.configure?(view)
-            self.view = view
-            if let report { view.showImportReport(report) }
-        } catch {
-            let why = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-            message = MessagePage(title: Words.t("This design could not be opened."), detail: "\(url.lastPathComponent): \(why)")
+        for attempt in 0..<2 {
+            do {
+                let prepared = try await WindowsCore.prepareOpen(url)
+                try Task.checkCancellation()
+                install(try WindowsCore.openSlot(prepared), report: report)
+                return
+            } catch is WindowsCore.OpeningChanged where attempt == 0 {
+                continue
+            } catch is CancellationError {
+                return
+            } catch {
+                showOpenError(error)
+                return
+            }
         }
     }
 
-    /// A file from another app, read a moment after its tab shows, so its name is on screen while
-    /// a large Photoshop mockup takes its time.
-    private func bringIn() {
-        let source = url
-        message = MessagePage(title: Words.t("Bringing in %@…", source.lastPathComponent), detail: "")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, Tabs.shared.designs.contains(where: { $0 === self }) else { return }
-                do {
-                    let (made, summary) = try WindowsCore.importDesign(source, into: BezzleApp.designsFolder)
-                    self.url = made
-                    self.message = nil
-                    self.load(report: summary)
-                } catch {
-                    let why = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-                    self.message = MessagePage(title: Words.t("Bezzle could not bring in the file"), detail: "\(source.lastPathComponent): \(why)")
-                }
-                self.pageChanged()
-            }
-        }
+    private func install(_ slot: WindowsCore.Slot, report: WindowsCore.ImportSummary?) {
+        let view = DesignWindow(slot: slot)
+        Tabs.shared.configure?(view)
+        self.view = view
+        message = nil
+        if let report { view.showImportReport(report) }
+    }
+
+    private func showOpenError(_ error: any Swift.Error) {
+        let why = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+        message = MessagePage(title: Words.t("This design could not be opened."), detail: "\(url.lastPathComponent): \(why)")
+    }
+
+    func waitForOpen() async -> WindowsCore.Slot? {
+        await opening?.value
+        return slot
     }
 
     /// Another tab comes to the front.
@@ -211,6 +231,8 @@ final class DesignTab {
 
     /// Lets the design go, saved: each time a design is worked on leaves a version, if it changed.
     fileprivate func close() {
+        opening?.cancel()
+        opening = nil
         message = nil
         guard let view, let slot else { return }
         // In a synced folder, the version and the picture are the computer's that changed it.
@@ -288,13 +310,13 @@ final class Tabs {
     /// again each time, as a new design.
     ///
     /// A design of Bezzle's opens under a cover, as on the Mac: its tab shows at once, the
-    /// window's paper over it with Bezzle's mark pressed into it, and the design is opened once
-    /// the cover is on screen; the cover lifts once the design has been drawn.
-    func open(_ url: URL, report: WindowsCore.ImportSummary? = nil) {
+    /// window's paper over it with Bezzle's mark pressed into it while the design is prepared.
+    /// The cover lifts once the design has been drawn.
+    @discardableResult func open(_ url: URL, report: WindowsCore.ImportSummary? = nil) -> DesignTab {
         let url = url.standardizedFileURL
         if !WindowsCore.imports(url), let tab = tab(showing: url) {
             select(tab)
-            return
+            return tab
         }
         // The one in front lets go of what it holds while it is still the core's.
         selected?.leaveFront()
@@ -311,34 +333,26 @@ final class Tabs {
         designs.append(tab)
         Trace.time("opening \(url.lastPathComponent)")
         OpeningCover.watchThread()
-        // One from another app shows its name while it comes in instead.
-        guard !WindowsCore.imports(url), !OpeningCover.off else {
-            tab.load(report: report)
-            show(tab.id)
-            Trace.time("design opened")
-            uncoverWhenDrawn(tab)
-            return
+        let covered = !WindowsCore.imports(url) && !OpeningCover.off
+        if covered {
+            tab.cover = OpeningCover(plan: OpeningPlan.Cover(began: WindowsCore.now, growing: false))
         }
-        // Here the window takes its new size at once, where the Mac's grows for a moment, so a
-        // design open within the grace comes through without the mark, the first one too.
-        let cover = OpeningCover(plan: OpeningPlan.Cover(began: WindowsCore.now, growing: false))
-        tab.cover = cover
         show(tab.id)
-        cover.whenShown { [weak self, weak tab] in
-            let open = {
-                // Closed meanwhile, it is not opened.
-                guard let self, let tab, self.designs.contains(where: { $0 === tab }) else { return }
-                tab.load(report: report)
-                Trace.time("design opened")
-                self.opened(tab)
-                self.uncoverWhenDrawn(tab)
+        tab.opening = Task { [weak self, weak tab] in
+            guard let self, let tab, !Task.isCancelled else { return }
+            await tab.cover?.waitUntilShown()
+            if covered, OpeningCover.hold > 0 {
+                try? await Task.sleep(for: .seconds(OpeningCover.hold))
             }
-            if OpeningCover.hold > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + OpeningCover.hold) { MainActor.assumeIsolated { open() } }
-            } else {
-                open()
-            }
+            guard !Task.isCancelled else { return }
+            await tab.load(report: report)
+            guard !Task.isCancelled else { return }
+            Trace.time("design opened")
+            self.opened(tab)
+            self.uncoverWhenDrawn(tab)
+            tab.opening = nil
         }
+        return tab
     }
 
     /// A design opened under its cover: it comes to the front if its tab is, or else the core goes

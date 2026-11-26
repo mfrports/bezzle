@@ -29,7 +29,8 @@ final class OpeningCover {
     private let word = StackPanel()
     private var letters: [TextBlock] = []
     private var pressed = false
-    private var waiting: [() -> Void] = []
+    private var shown = false
+    private var waiting: CheckedContinuation<Void, Never>?
     private var ticking: EventCleanup?
 
     init(plan: OpeningPlan.Cover) {
@@ -76,7 +77,12 @@ final class OpeningCover {
         root.sizeChanged.addHandler { [weak self] _, _ in MainActor.assumeIsolated { self?.place() } }
         root.loaded.addHandler { [weak self] _, _ in MainActor.assumeIsolated { self?.press() } }
         // Never shown, as in a window out of sight, the design opens all the same.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in MainActor.assumeIsolated { self?.press() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.press()
+                self?.didShow()
+            }
+        }
     }
 
     /// Whether Windows' animation effects are off (Settings › Accessibility › Visual effects):
@@ -100,7 +106,7 @@ final class OpeningCover {
         for spec in (ProcessInfo.processInfo.environment["BEZZLE_OPEN_AT"] ?? "").split(separator: ";") {
             guard let colon = spec.firstIndex(of: ":"), let s = Double(spec[..<colon]) else { continue }
             let path = String(spec[spec.index(after: colon)...])
-            DispatchQueue.main.asyncAfter(deadline: .now() + s) { MainActor.assumeIsolated { Tabs.shared.open(URL(fileURLWithPath: path)) } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + s) { MainActor.assumeIsolated { _ = Tabs.shared.open(URL(fileURLWithPath: path)) } }
         }
     }
 
@@ -131,9 +137,18 @@ final class OpeningCover {
         }
     }
 
-    /// Does `then` once the cover is on screen, its moves handed over: at once if they are.
-    func whenShown(_ then: @escaping () -> Void) {
-        if pressed { DispatchQueue.main.async { MainActor.assumeIsolated { then() } } } else { waiting.append(then) }
+    /// Waits for a frame before installing a design, even when its preparation is quick.
+    func waitUntilShown() async {
+        if shown { return }
+        await withCheckedContinuation { waiting = $0 }
+    }
+
+    private func didShow() {
+        ticking?.dispose()
+        ticking = nil
+        shown = true
+        waiting?.resume()
+        waiting = nil
     }
 
     // MARK: Putting it together
@@ -176,16 +191,8 @@ final class OpeningCover {
         for move in OpeningPlan.pressing(calm: calm) { start(move, after: max(0, plan.marks - now)) }
         pressed = true
         Trace.time("opening cover on its way, its pictures drawn and its moves handed over")
-        // A frame for the moves to reach the compositor before anything holds the window's thread.
         ticking = CompositionTarget.rendering.addHandler { [weak self] _, _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.ticking?.dispose()
-                self.ticking = nil
-                let waiting = self.waiting
-                self.waiting = []
-                DispatchQueue.main.async { MainActor.assumeIsolated { waiting.forEach { $0() } } }
-            }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.didShow() } }
         }
     }
 

@@ -74,10 +74,15 @@ extension WindowsCore {
 
     /// The open design as it is shared, which its own file may lag behind: a design in a synced
     /// folder, or one with people's files in it.
-    static func openShared(_ url: URL, file doc: BezzleDocument) -> BezzleDocument {
+    static func openShared(_ url: URL, file doc: BezzleDocument, prepared: SharedSession.Prepared? = nil) -> BezzleDocument {
         sharing?.close()
         sharing = nil
-        guard let session = SharedSession.open(url, replica: replica, file: doc) else { return doc }
+        guard let session = SharedSession.open(url, replica: replica, file: doc, prepared: prepared?.folder) else { return doc }
+        if let prepared {
+            sharing = session
+            session.start(prepared)
+            return prepared.document
+        }
         var shown = session.document()
         shown.viewport = doc.viewport
         sharing = session
@@ -207,7 +212,7 @@ extension WindowsCore {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     }
 
-    static var nowMilliseconds: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+    nonisolated static var nowMilliseconds: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 }
 
 // MARK: - The design as everyone has it
@@ -270,14 +275,15 @@ final class SharedSession {
     /// The shared design at `url`, if it is one: shared by link, kept in a synced folder, or with
     /// people's files. A copy of a design shared by link, as Explorer makes, is not shared: it
     /// becomes a design of its own.
-    static func open(_ url: URL, replica: String, file: BezzleDocument) -> SharedSession? {
+    static func open(_ url: URL, replica: String, file: BezzleDocument, prepared: FolderCopy.Prepared? = nil) -> SharedSession? {
         guard FolderCopy.isPackage(url) else { return nil }
         var link = Linking.link(of: url)
         if let keys = link?.keys, !Linking.claim(keys.room, at: url) {
             Linking.unlink(url)
             link = nil
         }
-        guard link != nil || FolderCopy.applies(to: url), let opened = FolderCopy.open(url, replica: replica, file: file) else { return nil }
+        guard link != nil || FolderCopy.applies(to: url),
+              let opened = FolderCopy.open(url, replica: replica, file: file, prepared: prepared) else { return nil }
         return SharedSession(url: url, state: opened.state, folder: opened.copy, link: link, replica: replica)
     }
 
@@ -285,6 +291,54 @@ final class SharedSession {
     /// Mac's attach).
     func start(with doc: BezzleDocument) {
         takeIn(doc)
+        cloud?.start(for: self)
+        openLive()
+    }
+
+    /// The initial model and the baseline used to tell later edits apart from it.
+    nonisolated struct Prepared: Sendable {
+        let folder: FolderCopy.Prepared
+        let document: BezzleDocument
+        let state: SharedDesign
+        let base: FlatDesign
+        let decoded: [UUID: (layer: SharedLayer, node: Node)]
+        let pictures: [UUID: Set<String>]
+        let readOnly: Bool
+        let changed: Bool
+    }
+
+    nonisolated static func prepare(_ url: URL, replica: String, file: BezzleDocument, link: ShareLink?) throws -> Prepared {
+        let folder = FolderCopy.prepare(url, replica: replica, file: file)
+        try Task.checkCancellation()
+        var state = folder.opened.state
+        var decoded: [UUID: (layer: SharedLayer, node: Node)] = [:]
+        let before = state.flatDesign(reusing: &decoded)
+        try Task.checkCancellation()
+        var document = before.document()
+        document.viewport = file.viewport
+        try Task.checkCancellation()
+        let readOnly = link?.ended == true
+        let base = readOnly ? before : FlatDesign(document)
+        let changed = !readOnly && state.absorb(base, since: before, by: replica, at: WindowsCore.nowMilliseconds)
+        var pictures: [UUID: Set<String>] = [:]
+        if !readOnly {
+            for node in document.nodes { pictures[node.id] = Self.pictures(in: [node]) }
+        }
+        return Prepared(folder: folder, document: document, state: state, base: base, decoded: decoded,
+                        pictures: pictures, readOnly: readOnly, changed: changed)
+    }
+
+    fileprivate func start(_ prepared: Prepared) {
+        state = prepared.state
+        base = prepared.base
+        decoded = prepared.decoded
+        baseDoc = prepared.readOnly ? nil : prepared.document
+        basePictures = prepared.pictures
+        if prepared.changed {
+            changedUpTo = state.clock.time
+            cloud?.changed()
+        }
+        if !prepared.readOnly { cloud?.offer(shownPictures) }
         cloud?.start(for: self)
         openLive()
     }
@@ -357,7 +411,7 @@ final class SharedSession {
     }
 
     /// The pictures layers show, in their looks and their masks.
-    static func pictures(in nodes: [Node]) -> Set<String> {
+    nonisolated static func pictures(in nodes: [Node]) -> Set<String> {
         var names = Set<String>()
         func visit(_ n: Node) {
             for image in n.paintedPictures { names.formUnion(image.assets) }
@@ -492,20 +546,20 @@ final class FolderCopy {
         people = Self.sorted(seen.people)
     }
 
-    static func isPackage(_ url: URL) -> Bool {
+    nonisolated static func isPackage(_ url: URL) -> Bool {
         var isFolder: ObjCBool = false
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder) && isFolder.boolValue
     }
 
     /// Whether a design keeps its changes in parts: one in a synced folder, or one that has been
     /// or is shared, whose parts go on being written wherever it is.
-    static func applies(to design: URL) -> Bool {
+    nonisolated static func applies(to design: URL) -> Bool {
         guard isPackage(design) else { return false }
         return FolderShare.isShared(design) || SyncedPlaces.service(of: design) != nil
     }
 
     /// The design's own file as it is, with when it was written, for the first of the parts.
-    private static func ownFile(_ url: URL, _ doc: BezzleDocument) -> (doc: BezzleDocument, modified: Int64)? {
+    nonisolated private static func ownFile(_ url: URL, _ doc: BezzleDocument) -> (doc: BezzleDocument, modified: Int64)? {
         let file = url.appendingPathComponent("document.json")
         let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
         return (doc, Int64(modified.timeIntervalSince1970 * 1000))
@@ -513,7 +567,19 @@ final class FolderCopy {
 
     /// The design as everyone's files have it, with what is needed to keep it in step; the first
     /// time, from `seed` or its own file (`FolderShare.opening`).
-    static func open(_ url: URL, replica: String, seed: SharedDesign? = nil, file: BezzleDocument?) -> (copy: FolderCopy, state: SharedDesign)? {
+    nonisolated struct Prepared: Sendable {
+        let seen: FolderShare.Seen
+        let opened: FolderShare.Opening
+        let initialPart: Data?
+    }
+
+    nonisolated static func prepare(_ url: URL, replica: String, seed: SharedDesign? = nil, file: BezzleDocument?) -> Prepared {
+        let found = FolderShare.look(url, replica: replica, seen: FolderShare.Seen(), opening: true)
+        let opened = FolderShare.opening(found, seed: seed, file: { file.flatMap { ownFile(url, $0) } }, by: replica)
+        return Prepared(seen: found.seen, opened: opened, initialPart: opened.first == nil ? nil : FolderShare.pack(opened.state))
+    }
+
+    static func open(_ url: URL, replica: String, seed: SharedDesign? = nil, file: BezzleDocument?, prepared: Prepared? = nil) -> (copy: FolderCopy, state: SharedDesign)? {
         let mine = FolderShare.folder(of: replica, in: url)
         do {
             // In the design while it is there, never its package made anew: one made again while
@@ -523,15 +589,15 @@ final class FolderCopy {
             NSLog("Bezzle could not make room for its files in %@: %@", url.path, "\(error)")
             return nil
         }
-        let found = FolderShare.look(url, replica: replica, seen: FolderShare.Seen(), opening: true)
-        let opened = FolderShare.opening(found, seed: seed, file: { file.flatMap { ownFile(url, $0) } }, by: replica)
+        let prepared = prepared ?? prepare(url, replica: replica, seed: seed, file: file)
+        let opened = prepared.opened
         if let whole = opened.first {
-            guard let data = FolderShare.pack(opened.state), (try? data.write(to: mine.appendingPathComponent(whole.fileName), options: .atomic)) != nil else {
+            guard let data = prepared.initialPart, (try? data.write(to: mine.appendingPathComponent(whole.fileName), options: .atomic)) != nil else {
                 NSLog("Bezzle could not write the first of its files in %@", url.path)
                 return nil
             }
         }
-        var room = found.seen.room
+        var room = prepared.seen.room
         if room?.isValid != true || !claim(room!, at: url) {
             // None yet, or this is a copy of the design made in Explorer, which is a design of its
             // own, with a room of its own.
@@ -540,7 +606,7 @@ final class FolderCopy {
             _ = claim(fresh, at: url)
             room = fresh
         }
-        var seen = found.seen
+        var seen = prepared.seen
         seen.room = room
         let copy = FolderCopy(url: url, replica: replica, room: room!, seen: seen, own: opened.own, writtenUpTo: opened.writtenUpTo)
         copy.introduce(since: WindowsCore.nowMilliseconds)

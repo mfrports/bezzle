@@ -67,7 +67,7 @@ final class BrowserWindow {
     private init() {}
 
     /// What the core asks of the window, given once as Bezzle starts.
-    func connect(opened: @escaping (URL, WindowsCore.ImportSummary?) -> WindowsCore.Slot?,
+    func connect(opened: @escaping @MainActor @Sendable (URL, WindowsCore.ImportSummary?) async -> WindowsCore.Slot?,
                  broughtIn: @escaping (WindowsCore.Slot, [UUID], WindowsCore.ImportSummary) -> Void,
                  designsFolder: @escaping () -> URL) {
         var hooks = WebBrowser.Window()

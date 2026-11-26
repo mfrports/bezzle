@@ -295,8 +295,8 @@ nonisolated extension MotionKey {
 /// follows from what it holds, and fitting it again moves what it holds the other way; kept like
 /// this, a layer in a group stays put on its artboard through that, so one person's change to a
 /// group never moves a layer someone else put somewhere in it.
-nonisolated struct FlatDesign: Equatable {
-    struct Entry: Equatable {
+nonisolated struct FlatDesign: Equatable, Sendable {
+    struct Entry: Equatable, Sendable {
         var parent: UUID?
         var node: Node
     }

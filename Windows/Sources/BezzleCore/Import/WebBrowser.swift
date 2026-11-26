@@ -61,7 +61,7 @@ public final class WebBrowser {
         public var still: (Still?) -> Void = { _ in }
         /// A new design made of pages, to open in a tab behind the browser, saying what came across;
         /// the design open, or nil.
-        public var opened: (URL, WindowsCore.ImportSummary?) -> WindowsCore.Slot? = { _, _ in nil }
+        public var opened: @MainActor (URL, WindowsCore.ImportSummary?) async -> WindowsCore.Slot? = { _, _ in nil }
         /// Pages came into an open design: its window shows them, selected, and says what came across.
         public var broughtIn: (WindowsCore.Slot, [UUID], WindowsCore.ImportSummary) -> Void = { _, _, _ in }
         /// Where new designs are kept.
@@ -467,11 +467,11 @@ public final class WebBrowser {
     @discardableResult
     func importShown(name: String? = nil, into slot: WindowsCore.Slot? = nil) async throws -> Brought {
         _ = try page()
-        begin()
+        try begin()
         defer { end() }
         var (read, held) = try await readShown { [weak self] what, done in self?.say(what, done) }
         read.name = Self.given(name) ?? WebImport.boardName(of: read.page, size: size, among: nodes(of: slot ?? target))
-        return try bring([read], held: held, into: slot)
+        return try await bring([read], held: held, into: slot)
     }
 
     /// Brings several pages in at once, side by side in one design and one step of its undo
@@ -482,7 +482,7 @@ public final class WebBrowser {
     func importPages(_ chosen: [WebSitePage], into slot: WindowsCore.Slot? = nil) async throws -> Brought {
         _ = try page()
         guard !chosen.isEmpty else { throw Failure.page(String(localized: "Choose the pages to import.")) }
-        begin()
+        try begin()
         done = []
         defer {
             reading = nil
@@ -521,7 +521,7 @@ public final class WebBrowser {
             }
         }
         guard !reads.isEmpty else { throw Failure.page(String(localized: "None of the pages could be read.")) }
-        var brought = try bring(reads, held: held, into: slot)
+        var brought = try await bring(reads, held: held, into: slot)
         brought.missed = missed
         if !missed.isEmpty { fail(String(localized: "\(missed.count) pages could not be read.")) }
         return brought
@@ -555,7 +555,7 @@ public final class WebBrowser {
 
     /// Pages read, brought into `slot`, or else the design the last pages went into, or else a
     /// new design, opened behind the browser, which the pages after them go into too.
-    private func bring(_ reads: [WebRead], held: [String: Data], into slot: WindowsCore.Slot?) throws -> Brought {
+    private func bring(_ reads: [WebRead], held: [String: Data], into slot: WindowsCore.Slot?) async throws -> Brought {
         let source = WebImport.source(of: url ?? URL(fileURLWithPath: "/"))
         if let into = slot ?? destination {
             guard into.isOpen else { throw Failure.gone }
@@ -566,14 +566,16 @@ public final class WebBrowser {
             return Brought(slot: into, ids: ids, report: report)
         }
         let (design, report) = try WebImport.write(reads, held: held, source: source, into: window.designsFolder())
-        guard let made = window.opened(design, report.lines.isEmpty ? nil : WindowsCore.summary(of: report)) else { throw Failure.gone }
-        destination = made
+        guard let made = await window.opened(design, report.lines.isEmpty ? nil : WindowsCore.summary(of: report)), made.isOpen else { throw Failure.gone }
+        try Task.checkCancellation()
+        if destination == nil { destination = made }
         imported()
         let ids = WindowsCore.using(made) { WindowsCore.design?.nodes.filter(\.isArtboard).map(\.id) ?? [] }
         return Brought(slot: made, ids: ids, report: report)
     }
 
-    private func begin() {
+    private func begin() throws {
+        guard !importing else { throw Failure.page(String(localized: "A page is already being brought in.")) }
         touch()
         fail(nil)
         stage = String(localized: "Scrolling through the page…")
