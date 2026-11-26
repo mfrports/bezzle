@@ -475,8 +475,9 @@ final class BezzleApp: SwiftApplication {
     /// Home is closed: Bezzle quits once every open design is on disk. One that could not be
     /// written keeps it open, unless told to go all the same (the Mac's applicationShouldTerminate).
     @MainActor private func quit() {
+        guard !quitting else { return }
         let unsaved = Tabs.shared.saveAll()
-        guard !unsaved.isEmpty, let root = presented?.root.xamlRoot else { finishQuitting(); return }
+        guard !unsaved.isEmpty, let root = presented?.root.xamlRoot else { beginQuitting(); return }
         let dialog = ContentDialog()
         dialog.xamlRoot = root
         if unsaved.count == 1, let design = unsaved.first {
@@ -489,9 +490,15 @@ final class BezzleApp: SwiftApplication {
         dialog.primaryButtonText = Words.t("Keep Bezzle Open")
         dialog.secondaryButtonText = Words.t("Quit Anyway")
         dialog.secondaryButtonClick.addHandler { [weak self] _, _ in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.finishQuitting() } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.beginQuitting() } }
         }
         _ = try? dialog.showAsync()
+    }
+
+    @MainActor private func beginQuitting() {
+        guard !quitting, HandOver.stopAccepting() else { return }
+        quitting = true
+        finishQuitting()
     }
 
     /// Every tab closed, each design saved and let go, and Bezzle goes. Its window is not taken
@@ -505,11 +512,12 @@ final class BezzleApp: SwiftApplication {
         Updates.stop()
         // A subject matte cut short by quitting is no matte that took Bezzle down.
         SubjectModel.shared.quitting()
-        quitting = true
         Trace.say("quitting, everything saved")
         try? window?.appWindow?.hide()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            _ = TerminateProcess(GetCurrentProcess(), 0)
+        SavedPreviews.shared.finish {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                _ = TerminateProcess(GetCurrentProcess(), 0)
+            }
         }
     }
 
