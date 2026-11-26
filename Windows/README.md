@@ -444,9 +444,9 @@ with nothing picked or the word by the artboard's top right corner looks from th
 the values a tab keeps), handed to `doc.looks` whenever the design is set, so undo, redo and a
 gesture made again leave them alone, and gone when the design is seen as a prototype, inspected
 or animated. `WindowsCore.LookHand` is the Mac's LookTool for the canvas, which draws its posts
-and its word. Windows has no tiles: an artboard looked at from the side is drawn whole again, as
-far as it reaches off the page (`WindowsCore.drawn`, `picture(of:part:scale:)`), and whatever
-leaves the canvas reads `doc.front`. The AI server's `turn_layers` and `keepsDepth` are the Mac's.
+and its word. Windows draws the part of an artboard in sight, including what reaches off the page
+(`WindowsCore.drawn`, `picture(of:part:scale:)`). Whatever leaves the canvas reads `doc.front`.
+The AI server's `turn_layers` and `keepsDepth` are the Mac's.
 `bezzle-render <fonts> depth <out>` tries all of it without a window (`Host/DepthCheck.swift`: the
 card's changes, turning from a side, a group that keeps depth picked, drawn and played, the look
 with its posts and word, and the AI server), and `BEZZLE_LOOK=-45,0` (degrees across, down) draws

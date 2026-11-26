@@ -320,10 +320,25 @@ extension BezzleDocument {
     /// turn when seen turned); text follows XD: as wide as its words, its letters grow and it
     /// settles round the side across from the handle (the middle, `fromCenter` or turned); a
     /// fixed width pulled by its top, bottom or a corner becomes a box of fixed size. A line keeps
-    /// which way it rises. An artboard's layers are the caller's to keep in place
-    /// (`keepingLayers`), or to lay out again.
+    /// which way it rises. Pulled in proportion (`keep`), its corners grow and shrink with it, and
+    /// those of everything in it, so it keeps its look. An artboard's layers are the caller's to
+    /// keep in place (`keepingLayers`), or to lay out again.
     static func resized(_ original: Node, to next: CGRect, whole: CGRect, origin o: CGPoint, bounds: CGRect, rotation: Double,
-                        handle: Handle, single: Bool, fromCenter option: Bool, carousel: Bool) -> Node {
+                        handle: Handle, single: Bool, fromCenter option: Bool, carousel: Bool, keep: Bool) -> Node {
+        var node = pulled(original, to: next, whole: whole, origin: o, bounds: bounds, rotation: rotation,
+                          handle: handle, single: single, fromCenter: option, carousel: carousel)
+        if keep, !original.isArtboard {
+            // How far the box the handles sat on grew: one layer's is that box itself, each of
+            // several is mapped from it.
+            let from = single ? bounds.size : whole.size
+            let k = from.width >= from.height ? next.width / from.width : next.height / from.height
+            if k.isFinite, k > 0, k != 1 { node.scaleCorners(by: k) }
+        }
+        return node
+    }
+
+    private static func pulled(_ original: Node, to next: CGRect, whole: CGRect, origin o: CGPoint, bounds: CGRect, rotation: Double,
+                               handle: Handle, single: Bool, fromCenter option: Bool, carousel: Bool) -> Node {
         var node = original
         node.frame = next.offsetBy(dx: -o.x, dy: -o.y)
         // A carousel's slides are as high as it is pulled.
@@ -385,5 +400,21 @@ extension BezzleDocument {
         let moved = CGPoint(x: original.frame.minX - next.minX, y: original.frame.minY - next.minY)
         for i in b.children.indices { b.children[i].frame = b.children[i].frame.offsetBy(dx: moved.x, dy: moved.y) }
         return b
+    }
+}
+
+extension Node {
+    /// Its corners, and those of everything in it however deep, grown or shrunk by `k`, to a
+    /// hundredth of a point, as a pull in proportion grows or shrinks it. Named corners stay as
+    /// their name has them: changed on one layer, they would change on every layer that has them.
+    /// What a component's copy holds keeps its component's corners, as the copy lays it out by its
+    /// pins rather than stretching it.
+    nonisolated mutating func scaleCorners(by k: CGFloat) {
+        if cornersNamed == nil, cornerRadius != 0 || corners != nil {
+            radii = radii.map { ($0 * k * 100).rounded() / 100 }
+        }
+        guard instance == nil else { return }
+        for i in children.indices { children[i].scaleCorners(by: k) }
+        if let held = mask { mask = held.map { var m = $0; m.scaleCorners(by: k); return m } }
     }
 }

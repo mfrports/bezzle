@@ -1791,7 +1791,7 @@ final class CanvasView: NSView, NSTextViewDelegate, NSMenuItemValidation {
                     if originals.count > 1 { next = Geometry.snapToPixels(next) }
                     doc.update(id) {
                         $0 = BezzleDocument.resized(original, to: next, whole: whole, origin: o, bounds: bounds, rotation: rotation,
-                                                    handle: handle, single: originals.count == 1, fromCenter: option, carousel: carousel != nil)
+                                                    handle: handle, single: originals.count == 1, fromCenter: option, carousel: carousel != nil, keep: keep)
                     }
                     if original.isArtboard, let session = adaptSessions[id] {
                         // Its design is laid out again for the size it is being given.

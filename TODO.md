@@ -564,6 +564,15 @@ The tab covered by the window's paper with Bezzle's mark pressed into it while t
 
 ## Housekeeping
 
+- **Windows draws an open design's picture for Explorer on the UI thread** as it closes and
+  every so often while it is worked on (`DesignSession.makePreview`, `WindowsCore.writePreview`);
+  the Mac draws it in the background (`DesignPreview.making`). MarcDietschi's draft pull request #9
+  moves it into a worker process, left open on 2026-11-24 at his word: with the design listed on
+  Home, closing it was slower than before (1,922 ms against 1,665) and Home's worker drew the same
+  picture again. It needs to agree with Home's worker from #2 (`HomePreviews`) on who makes a
+  package's picture, and it changes quitting (previews get up to three more seconds; a start
+  meanwhile waits for the old copy).
+
 - **The Export sheet closes by itself** once every file is written, and stays only to say what
   could not be made (2026-11-16, both `ExportSheet.swift`). On the Mac built, not tried in a
   window (the folder panel wants a person). On Windows written while the VM was off: never built
@@ -619,3 +628,14 @@ The tab covered by the window's paper with Bezzle's mark pressed into it while t
   the old and new font readers over the VM's 143 font files gave the same 166 faces (30 to 21 ms).
   The Mac was notarized with the API key, `harness-notary` still missing; the Windows installers
   are the dry run's, not run, and no installed 1.9.3 was seen taking the update.
+
+- **1.9.5 as released, not watched** (2026-11-24, the Mac and Windows from 3a24ffb: MarcDietschi's
+  pull requests #2, #3, #4, #6, #7 and #8, the Mac's own unchanged saves and Home thumbnails drawn
+  off the main thread, and corners that follow a Shift resize). The whole Mac suite one test at a
+  time (2,248 tests). The six pull requests merged together were built in the VM and tried in a
+  Debug copy on the public Wander Night and Wander Pitch: Home's previews from the worker, a
+  design opened from Home with every picture, zoomed to 486% and moved about, a second tab opened
+  and closed, and a box Shift-pulled from 105×70 with corners of 18 to 210×140 with corners of 36.
+  Not measured against 1.9.4 (Marc's numbers are in his pull requests). The Mac was notarized with
+  `harness-notary`, which was back; the Windows installers are the dry run's, not run, and no
+  installed 1.9.4 was seen taking the update.

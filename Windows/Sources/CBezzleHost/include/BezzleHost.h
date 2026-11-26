@@ -157,6 +157,11 @@ int32_t bz_heif_problem(void);
 /// Adds one of a design's pictures by name, as its encoded bytes. Returns its asset number, 0
 /// if Skia cannot read it.
 int32_t bz_asset_add(const char *name, const void *data, int32_t count);
+/// Registers a picture from a design package. JPEG pixels are decoded on the first lookup.
+/// Returns 1 if registered, or 0 if the image could not be read.
+int32_t bz_asset_add_from_package(const char *name, const void *data, int32_t count, uint64_t package);
+/// Releases decoded pixels for package images without another open package using the same record.
+void bz_asset_close_package(uint64_t package);
 /// Shows a picture that is not here yet by its glimpse (a JPEG a few dozen pixels across, from
 /// whoever placed it in a shared design), until bz_asset_add brings the picture itself: grown to
 /// `longest` across and blurred, as the Mac's LiveGlimpse.standIn makes it. Returns its asset
@@ -226,6 +231,9 @@ void bz_picture_forget(int32_t id);
 /// by `blur` (Core Graphics' measure: twice the sigma), in `rgb` at `alpha`, drawn into premultiplied
 /// BGRA pixels `pad` larger on every side. Returns 0 when done.
 int32_t bz_shadow(int32_t width, int32_t height, int32_t pad, double blur, double dy, uint32_t rgb, double alpha, void *pixels);
+/// The same shadow, drawn into a window whose origin is relative to the artboard's top-left.
+int32_t bz_shadow_part(double boardWidth, double boardHeight, double left, double top, int32_t width, int32_t height,
+                       double blur, double dy, uint32_t rgb, double alpha, void *pixels);
 /// Home's table: `table` in a rectangle of radius 20 (points, at `scale` pixels each), a pool of
 /// `light` at `strength` round (`x`, `y`) (fractions of the width and height) out to `reach` of the
 /// diagonal, and black at `shade` towards the bottom; into BGRA pixels. Returns 0 when done.

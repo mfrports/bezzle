@@ -49,6 +49,9 @@ public enum WindowsCore {
     /// was done here when it moves on.
     nonisolated(unsafe) static var designVersion = 0
     nonisolated(unsafe) static var assets = Assets(folder: nil)
+    /// The package whose decoded pixels the active design holds, or zero with no design.
+    static var rasterPackage: UInt64 = 0
+    private static var nextRasterPackage: UInt64 = 0
     /// Where the open design is kept: its package, or its file.
     nonisolated(unsafe) public internal(set) static var designURL: URL?
 
@@ -90,7 +93,13 @@ public enum WindowsCore {
     /// Opens the design in `folder`, a .bezzle package: its document.json, and its pictures in
     /// images/, by their file names, as the core asks for them. Answers its artboards.
     public static func open(_ folder: URL) throws -> [Board] {
-        let doc = try read(folder)
+        nextRasterPackage += 1
+        let package = nextRasterPackage
+        let doc: BezzleDocument
+        do { doc = try read(folder, package: package) }
+        catch { bz_asset_close_package(package); throw error }
+        bz_asset_close_package(rasterPackage)
+        rasterPackage = package
         typing = nil
         versions.reset()
         timeTable.forget()
@@ -129,12 +138,14 @@ public enum WindowsCore {
         Editing.gestureStart = nil
         Editing.gestureBase = nil
         assets = Assets(folder: nil)
+        bz_asset_close_package(rasterPackage)
+        rasterPackage = 0
     }
 
     /// A design's document as its file has it, its pictures given to Skia by their file names
     /// (each picture's own UUID): a package with its document.json, or a design from before
     /// pictures, one JSON file. Nothing that is open changes.
-    static func read(_ folder: URL) throws -> BezzleDocument {
+    static func read(_ folder: URL, package: UInt64 = 0) throws -> BezzleDocument {
         var isFolder: ObjCBool = false
         _ = FileManager.default.fileExists(atPath: folder.path, isDirectory: &isFolder)
         let json = isFolder.boolValue ? folder.appendingPathComponent("document.json") : folder
@@ -144,7 +155,7 @@ public enum WindowsCore {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: images.path)) ?? []
         for name in names {
             let data = try Data(contentsOf: images.appendingPathComponent(name))
-            giveSkia(name, data)
+            giveSkia(name, data, fromPackage: true, package: package)
         }
         // Pictures from the relay that wait beside a design in a synced folder (`arrivals`).
         let waiting = arrivals.images(of: folder)
@@ -184,10 +195,11 @@ public enum WindowsCore {
     /// Draws artboard `index` as `render` does, into pixels the caller has: its size first, then,
     /// in `fill`, where to put the premultiplied BGRA pixels, rows top first (a WinUI
     /// WriteableBitmap's own layout). The layers `hiding` are left out.
-    public static func render(board index: Int, scale: Double, hiding: Set<UUID> = [], into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
+    public static func render(board index: Int, scale: Double, hiding: Set<UUID> = [], part: CGRect? = nil,
+                              into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
         guard var doc = design, index < doc.nodes.count else { return false }
         // As much of the canvas as the artboard covers with them all: what the canvas places it by.
-        let part = drawn(seen(doc.nodes[index]))
+        let part = part ?? drawn(seen(doc.nodes[index]))
         // The text being typed into is shown by its editor, not drawn under it, as on the Mac, and
         // texts whose letters are on their way by the canvas, over the design.
         for id in hiding { doc.update(id) { $0.hidden = true } }
@@ -316,6 +328,15 @@ extension WindowsCore {
         guard let pixels = fill(width + 2 * pad, height + 2 * pad, pad) else { return false }
         return bz_shadow(Int32(width), Int32(height), Int32(pad), 10 * scale, 2 * scale, colour, 0.13, pixels) == 0
     }
+
+    /// Draws just `part` of that shadow, in pixels relative to the artboard's top-left.
+    public static func artboardShadow(boardWidth: Double, boardHeight: Double, part: CGRect, scale: Double,
+                                      colour: UInt32, into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
+        let width = Int32(part.width), height = Int32(part.height)
+        guard let pixels = fill(Int(width), Int(height)) else { return false }
+        return bz_shadow_part(boardWidth, boardHeight, part.minX, part.minY, width, height,
+                              10 * scale, 2 * scale, colour, 0.13, pixels) == 0
+    }
 }
 
 extension WindowsCore {
@@ -323,7 +344,7 @@ extension WindowsCore {
     /// changes first, in this computer's own files in it (`SharedSession.persist`), then its
     /// document.json (sorted keys), written whole; a package gone meanwhile is looked for (a shared
     /// design renamed by someone else) and otherwise made again, so nothing is lost. True when the
-    /// design was written.
+    /// current design is on disk. An unshared local document that already has those bytes keeps its file.
     ///
     /// In a folder a sync service keeps in step, only what was changed here: with nothing changed on
     /// this computer since it last wrote, nothing is written, so that one only looking on writes
@@ -359,11 +380,15 @@ extension WindowsCore {
         let data = try encoder.encode(doc)
         var isFolder: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder)
+        let file: URL
         if exists, !isFolder.boolValue {
-            try data.write(to: url, options: .atomic)
+            file = url
         } else {
             try FileManager.default.createDirectory(at: url.appendingPathComponent("images", isDirectory: true), withIntermediateDirectories: true)
-            try data.write(to: url.appendingPathComponent("document.json"), options: .atomic)
+            file = url.appendingPathComponent("document.json")
+        }
+        if sharing != nil || inSyncedFolder || (try? Data(contentsOf: file)) != data {
+            try data.write(to: file, options: .atomic)
         }
         // Pictures and versions from the relay that the folder has not brought by now go in with
         // this computer's own change; those it brought are forgotten (`arrivals`).
@@ -457,9 +482,14 @@ extension WindowsCore {
     public static func thumbnail(of url: URL, width: Double, height: Double, scale: Double, into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
         // Read on its own: the design that is open, its file and its undo stay as they are.
         guard let doc = try? read(url) else { return false }
-        let pictures = Assets(folder: url.appendingPathComponent("images"))
+        return thumbnail(of: doc, width: width, height: height, scale: scale,
+                         assets: Assets(folder: url.appendingPathComponent("images")), into: fill)
+    }
+
+    static func thumbnail(of doc: BezzleDocument, width: Double, height: Double, scale: Double, assets: Assets,
+                          into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> Bool {
         let first = Images.shared.list.last.map { $0.id + 1 } ?? 0
-        guard let image = Renderer.thumbnail(of: doc, size: CGSize(width: width, height: height), scale: CGFloat(scale), assets: pictures, cover: true) else { return false }
+        guard let image = Renderer.thumbnail(of: doc, size: CGSize(width: width, height: height), scale: CGFloat(scale), assets: assets, cover: true) else { return false }
         for picture in Images.shared.list where picture.id >= first { send(picture) }
         defer { forget(before: first) }
         guard let pixels = fill(image.width, image.height) else { return false }
