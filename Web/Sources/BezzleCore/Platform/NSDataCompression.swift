@@ -20,21 +20,7 @@ nonisolated public extension NSData {
             return out as NSData
         }
         guard algorithm == .lzfse else { throw Unsupported() }
-        let input = [UInt8](self as Data)
-        guard !input.isEmpty else { return NSData() }
-        var capacity = Swift.max(input.count * 8, 4096)
-        // Int is 32 bits here: 1 << 31 would be negative.
-        while capacity <= 1 << 30 {
-            var out = [UInt8](repeating: 0, count: capacity)
-            let n = out.withUnsafeMutableBufferPointer { o in
-                input.withUnsafeBufferPointer { i in lzfse_decode_buffer(o.baseAddress!, capacity, i.baseAddress!, input.count, nil) }
-            }
-            // Filled to the brim, it may not all have fitted: try again with more room.
-            if n == 0 { throw Corrupt() }
-            if n < capacity { return Data(out[0..<n]) as NSData }
-            capacity *= 4
-        }
-        throw Corrupt()
+        return try (self as Data).decompressedLZFSE() as NSData
     }
 
     func compressed(using algorithm: CompressionAlgorithm) throws -> NSData {
@@ -49,6 +35,32 @@ nonisolated public extension NSData {
         }
         guard n > 0 else { throw Corrupt() }
         return Data(out[0..<n]) as NSData
+    }
+}
+
+nonisolated extension Data {
+    /// Keeps a large archive in contiguous buffers through decompression.
+    func decompressedLZFSE() throws -> Data {
+        guard !isEmpty else { return Data() }
+        let limit = 1 << 30
+        guard count <= limit / 8 else { throw NSData.Corrupt() }
+        var capacity = Swift.max(count * 8, 4096)
+        while true {
+            var out = Data(count: capacity)
+            let n = out.withUnsafeMutableBytes { output in
+                withUnsafeBytes { source in
+                    lzfse_decode_buffer(output.bindMemory(to: UInt8.self).baseAddress!, output.count,
+                                        source.bindMemory(to: UInt8.self).baseAddress!, source.count, nil)
+                }
+            }
+            if n == 0 { throw NSData.Corrupt() }
+            if n < capacity {
+                return out.withUnsafeBytes { Data(bytes: $0.baseAddress!, count: n) }
+            }
+            // A full buffer may have truncated the result. Check before multiplying on 32-bit hosts.
+            if capacity > limit / 4 { throw NSData.Corrupt() }
+            capacity *= 4
+        }
     }
 }
 

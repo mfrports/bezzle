@@ -141,7 +141,11 @@ nonisolated enum FolderShare {
     }
 
     static func unpack(_ data: Data) -> SharedDesign? {
+        #if os(Windows)
+        guard let json = try? data.decompressedLZFSE() else { return nil }
+        #else
         guard let json = try? (data as NSData).decompressed(using: .lzfse) as Data else { return nil }
+        #endif
         return try? JSONDecoder().decode(SharedDesign.self, from: json)
     }
 
