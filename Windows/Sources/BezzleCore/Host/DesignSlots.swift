@@ -161,11 +161,20 @@ extension WindowsCore {
     /// Opens the design at `url` beside those open already, in a slot of its own, which becomes
     /// the one the core works on (`open`).
     public static func openSlot(_ url: URL) throws -> Slot {
+        try openSlot(url, prepared: nil)
+    }
+
+    /// Installs a design whose document and sharing state were prepared on the opening worker.
+    public static func openSlot(_ prepared: PreparedOpen) throws -> Slot {
+        try openSlot(prepared.url, prepared: prepared)
+    }
+
+    private static func openSlot(_ url: URL, prepared: PreparedOpen?) throws -> Slot {
         let before = active
         let slot = Slot()
         activate(slot)
         do {
-            _ = try open(url)
+            _ = try open(url, prepared: prepared)
         } catch {
             slot.isOpen = false
             active = nil

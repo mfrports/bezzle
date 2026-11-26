@@ -93,11 +93,25 @@ public enum WindowsCore {
     /// Opens the design in `folder`, a .bezzle package: its document.json, and its pictures in
     /// images/, by their file names, as the core asks for them. Answers its artboards.
     public static func open(_ folder: URL) throws -> [Board] {
+        try open(folder, prepared: nil)
+    }
+
+    static func open(_ folder: URL, prepared: PreparedOpen?) throws -> [Board] {
+        if let prepared, !prepared.isCurrent { throw OpeningChanged() }
         nextRasterPackage += 1
         let package = nextRasterPackage
         let doc: BezzleDocument
-        do { doc = try read(folder, package: package) }
-        catch { bz_asset_close_package(package); throw error }
+        do {
+            if let prepared {
+                doc = prepared.document
+                try readPictures(folder, package: package)
+            } else {
+                doc = try read(folder, package: package)
+            }
+        } catch {
+            bz_asset_close_package(package)
+            throw error
+        }
         bz_asset_close_package(rasterPackage)
         rasterPackage = package
         typing = nil
@@ -108,7 +122,7 @@ public enum WindowsCore {
         fronts = [:]
         sceneLooks = [:]
         // A shared design opens as it is shared, which its own file may lag behind.
-        design = openShared(folder, file: doc)
+        design = openShared(folder, file: doc, prepared: prepared?.shared)
         // Opened as it is, it has nothing done here to be written.
         sharing?.changedHere = false
         sharing?.editedHere = false
@@ -146,11 +160,22 @@ public enum WindowsCore {
     /// (each picture's own UUID): a package with its document.json, or a design from before
     /// pictures, one JSON file. Nothing that is open changes.
     static func read(_ folder: URL, package: UInt64 = 0) throws -> BezzleDocument {
-        var isFolder: ObjCBool = false
-        _ = FileManager.default.fileExists(atPath: folder.path, isDirectory: &isFolder)
-        let json = isFolder.boolValue ? folder.appendingPathComponent("document.json") : folder
+        let doc = try readDocument(documentFile(in: folder))
+        try readPictures(folder, package: package)
+        return doc
+    }
+
+    nonisolated static func documentFile(in folder: URL) -> URL {
+        FolderCopy.isPackage(folder) ? folder.appendingPathComponent("document.json") : folder
+    }
+
+    nonisolated static func readDocument(_ json: URL) throws -> BezzleDocument {
         var doc = try JSONDecoder().decode(BezzleDocument.self, from: Data(contentsOf: json))
         doc.repairStyles()
+        return doc
+    }
+
+    private static func readPictures(_ folder: URL, package: UInt64) throws {
         let images = folder.appendingPathComponent("images")
         let names = (try? FileManager.default.contentsOfDirectory(atPath: images.path)) ?? []
         for name in names {
@@ -162,7 +187,6 @@ public enum WindowsCore {
         for name in Set((try? FileManager.default.contentsOfDirectory(atPath: waiting.path)) ?? []).subtracting(names) {
             if let data = try? Data(contentsOf: waiting.appendingPathComponent(name)) { giveSkia(name, data) }
         }
-        return doc
     }
 
     /// Pictures and named versions that came from the relay to a design in a synced folder, kept

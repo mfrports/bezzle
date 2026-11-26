@@ -113,7 +113,7 @@ import Foundation
                 store.activate()
                 return store
             }
-            return try open(try locate(ref))
+            return try await open(try locate(ref))
         }
         guard let front = Self.stores.first else {
             throw MCPError("No design is open. list_designs shows the designs; open one with open_design, or make one with create_design.")
@@ -163,7 +163,7 @@ import Foundation
     /// Opens a design in a tab, as the home screen does, and brings it to the front.
     /// A file from Adobe XD, Figma, Sketch or Photoshop becomes a new design in the designs
     /// folder, which is what opens, as on the Mac.
-    private func open(_ url: URL) throws -> DocumentStore {
+    private func open(_ url: URL) async throws -> DocumentStore {
         var url = url
         var report: WindowsCore.ImportSummary?
         if WindowsCore.imports(url) {
@@ -181,11 +181,11 @@ import Foundation
             return store
         }
         MCPHost.shared.endEditing()
-        guard MCPHost.shared.open(url), let store = Self.stores.first(where: { $0.isAt(url) }) else {
+        guard let slot = await MCPHost.shared.open(url, report), slot.isOpen else {
             throw MCPError("\(url.lastPathComponent) could not be opened.")
         }
+        let store = DocumentStore.of(slot)
         store.activate()
-        if let report { MCPHost.shared.broughtIn(report) }
         return store
     }
 
@@ -237,7 +237,7 @@ import Foundation
         } catch {
             throw MCPError("The design could not be made: \(error)")
         }
-        let store = try open(url)
+        let store = try await open(url)
         store.zoomToFit()
         return [.text(summary(of: store, warnings: warnings).text)]
     }
@@ -275,7 +275,7 @@ import Foundation
             throw MCPError("\(address) could not be brought in: \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
         }
         // Opened in a tab, as the Mac opens it, with what came across at the canvas's foot.
-        let store = try open(design)
+        let store = try await open(design)
         MCPHost.shared.broughtIn(WindowsCore.summary(of: report))
         store.zoomToFit()
         var text = summary(of: store).text
@@ -356,7 +356,7 @@ import Foundation
             text = brought(ids, report, into: into)
         } else {
             let (design, report) = try WebImport.write(reads, held: held, source: WebImport.source(of: first), into: MCPHost.shared.designsFolder())
-            let store = try open(design)
+            let store = try await open(design)
             if !report.lines.isEmpty { MCPHost.shared.broughtIn(WindowsCore.summary(of: report)) }
             store.zoomToFit()
             text = brought(store.doc.nodes.filter(\.isArtboard).map(\.id), report, into: store)

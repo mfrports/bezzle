@@ -4,7 +4,7 @@ import WinSDK
 /// Folders that the computers of those working in them keep in step, as Windows has them: OneDrive,
 /// Google Drive, Dropbox, Box, iCloud Drive, or a server's (the Mac's SyncedFolders). A design kept
 /// in one is shared through it (see `FolderShare`), with everyone the folder is shared with.
-enum SyncedPlaces {
+nonisolated enum SyncedPlaces {
     #if DEBUG
     /// Folders treated as synced in tests, with the service each stands for.
     nonisolated(unsafe) static var forTests: [String: String] = [:]

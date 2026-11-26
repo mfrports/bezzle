@@ -242,8 +242,7 @@ final class BezzleApp: SwiftApplication {
             // Bezzle's browser (BrowserWindow.swift): a design it makes opens in a tab behind it,
             // and pages it brings into an open design show there, selected.
             BrowserWindow.shared.connect(opened: { made, summary in
-                Tabs.shared.open(made, report: summary)
-                return Tabs.shared.tab(showing: made)?.slot
+                await Tabs.shared.open(made, report: summary).waitForOpen()
             }, broughtIn: { slot, ids, summary in
                 Self.showBrought(ids, in: slot, summary, inView: false)
             }, designsFolder: { Self.designsFolder })
@@ -527,9 +526,8 @@ final class BezzleApp: SwiftApplication {
         let tabs = Tabs.shared
         var view: DesignWindow? { tabs.activeTab?.view }
         host.designsFolder = { Self.designsFolder }
-        host.open = { url in
-            tabs.open(url)
-            return tabs.tab(showing: url)?.slot != nil
+        host.open = { url, report in
+            await tabs.open(url, report: report).waitForOpen()
         }
         host.designs = { tabs.byRecency.compactMap(\.slot) }
         host.bringForward = { slot in if let tab = tabs.tab(of: slot) { tabs.select(tab) } }

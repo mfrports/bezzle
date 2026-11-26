@@ -15,8 +15,8 @@ import Foundation
     /// Where designs are kept: the home screen's folder.
     public var designsFolder: () -> URL = { FileManager.default.temporaryDirectory }
     /// Opens a design in a tab of its own and brings it to the front, as home does, or brings its
-    /// tab to the front when it is open already; whether it is open now.
-    public var open: (URL) -> Bool = { _ in false }
+    /// tab to the front when it is open already. Returns that tab's slot once open.
+    public var open: @MainActor (URL, WindowsCore.ImportSummary?) async -> WindowsCore.Slot? = { _, _ in nil }
     /// The open designs, the tab in front first, then as they were last looked at.
     public var designs: () -> [WindowsCore.Slot] = { [] }
     /// Brings an open design's tab to the front.
