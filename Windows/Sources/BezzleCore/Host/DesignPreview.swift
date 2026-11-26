@@ -223,15 +223,29 @@ extension WindowsCore {
         DesignPreview.write(doc, assets: assets, to: url)
     }
 
+    /// Updates a standalone package preview while keeping the package's timestamp.
+    @discardableResult public static func catchUpPreview(of url: URL) -> Bool {
+        var isFolder: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder),
+              isFolder.boolValue else { return false }
+        guard !DesignPreview.isCurrent(for: url), let doc = try? read(url) else {
+            DesignPreview.keepExplorerPicture(of: url)
+            return false
+        }
+        DesignPreview.write(doc, assets: Assets(folder: url.appendingPathComponent("images")), to: url, keepingDate: true)
+        return true
+    }
+
     /// Draws both the Home card and, when it is out of date, the package preview from one read.
     /// The Home worker owns its renderer and gives the finished pictures back to the window.
     public static func drawHomePreview(of url: URL, width: Double, height: Double, scale: Double,
+                                       package: Bool = true,
                                        into fill: (_ width: Int, _ height: Int) -> UnsafeMutableRawPointer?) -> (card: Bool, package: Data?) {
         guard let doc = try? read(url) else { return (false, nil) }
         let pictures = Assets(folder: url.appendingPathComponent("images"))
         let card = thumbnail(of: doc, width: width, height: height, scale: scale, assets: pictures, into: fill)
         var isFolder: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), isFolder.boolValue,
+        guard package, FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), isFolder.boolValue,
               !DesignPreview.isCurrent(for: url) else { return (card, nil) }
         return (card, DesignPreview.jpeg(of: doc, assets: pictures) ?? Data())
     }

@@ -227,7 +227,10 @@ final class DesignSession {
         shareTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.lookAtShare() }
         }
-        if WindowsCore.designHasPreview { previewed = WindowsCore.designChanges }
+        if WindowsCore.designHasPreview,
+           WindowsCore.savedPreview.map({ WindowsCore.savedPreviewIsCurrent($0) }) ?? true {
+            previewed = WindowsCore.designChanges
+        }
         film.select = { [weak self] ids in
             guard let self else { return }
             let board = ids.first.flatMap { WindowsCore.board(of: $0) ?? WindowsCore.boardIndex(of: $0) } ?? self.board

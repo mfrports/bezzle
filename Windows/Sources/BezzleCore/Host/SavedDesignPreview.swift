@@ -18,12 +18,26 @@ extension WindowsCore {
             self.modified = modified
             self.size = size
         }
+
+        public static func == (a: SavedPreview, b: SavedPreview) -> Bool {
+            a.identity == b.identity && a.modified == b.modified && a.size == b.size &&
+                a.url.standardizedFileURL.path.caseInsensitiveCompare(b.url.standardizedFileURL.path) == .orderedSame
+        }
     }
 
     /// Local packages can be drawn from disk. Shared previews still use the editor's live state.
     public static var savedPreview: SavedPreview? {
-        guard sharing == nil, let url = designURL, canRenderFromDisk(url) else { return nil }
+        guard sharing == nil, let url = designURL else { return nil }
+        return savedPreview(of: url)
+    }
+
+    public static func savedPreview(of url: URL) -> SavedPreview? {
+        guard canRenderFromDisk(url) else { return nil }
         return SavedPreview(of: url)
+    }
+
+    public static func savedPreviewIsCurrent(_ revision: SavedPreview) -> Bool {
+        savedPreview(of: revision.url) == revision && DesignPreview.isCurrent(for: revision.url)
     }
 
     /// Draws the saved package preview in a worker. An empty drawing produces an empty result.

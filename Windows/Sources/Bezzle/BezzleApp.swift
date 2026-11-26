@@ -496,7 +496,7 @@ final class BezzleApp: SwiftApplication {
     }
 
     @MainActor private func beginQuitting() {
-        guard !quitting else { return }
+        guard !quitting, HandOver.stopAccepting() else { return }
         quitting = true
         finishQuitting()
     }
@@ -512,7 +512,6 @@ final class BezzleApp: SwiftApplication {
         Updates.stop()
         // A subject matte cut short by quitting is no matte that took Bezzle down.
         SubjectModel.shared.quitting()
-        HandOver.stopAccepting()
         Trace.say("quitting, everything saved")
         try? window?.appWindow?.hide()
         SavedPreviews.shared.finish {

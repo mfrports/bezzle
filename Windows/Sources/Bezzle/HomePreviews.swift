@@ -55,15 +55,23 @@ import BezzleCore
         guard visible, work == nil else { return }
         while !queue.isEmpty {
             let card = queue.removeFirst()
+            let closed = Tabs.shared.tab(showing: card.url) == nil
+            let revision = WindowsCore.savedPreview(of: card.url)
+            let package = revision.map { closed && SavedPreviews.shared.claimForHome($0) } ?? true
+            let claim = package ? revision : nil
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Bezzle-preview-\(UUID())", isDirectory: true)
             let process = Process()
             process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
-            process.arguments = [HomePreviewWorker.command, card.url.path, directory.path, String(card.width), String(card.scale)]
+            process.arguments = [HomePreviewWorker.command, card.url.path, directory.path, String(card.width), String(card.scale),
+                                 package ? "package" : "card"]
             process.terminationHandler = { [weak self] ended in
                 let succeeded = ended.terminationStatus == 0
                 Task { @MainActor [weak self] in
-                    defer { try? FileManager.default.removeItem(at: directory) }
-                    self?.finished(card, directory: directory, succeeded: succeeded)
+                    defer {
+                        if let claim { SavedPreviews.shared.releaseFromHome(claim) }
+                        try? FileManager.default.removeItem(at: directory)
+                    }
+                    self?.finished(card, directory: directory, package: package, revision: claim, succeeded: succeeded)
                 }
             }
             do {
@@ -73,13 +81,14 @@ import BezzleCore
                 Trace.time("home preview started \(card.url.lastPathComponent)")
                 return
             } catch {
+                if let claim { SavedPreviews.shared.releaseFromHome(claim) }
                 waiting[card] = nil
                 try? FileManager.default.removeItem(at: directory)
             }
         }
     }
 
-    private func finished(_ card: Card, directory: URL, succeeded: Bool) {
+    private func finished(_ card: Card, directory: URL, package: Bool, revision: WindowsCore.SavedPreview?, succeeded: Bool) {
         work = nil
         if cancelled {
             cancelled = false
@@ -98,7 +107,8 @@ import BezzleCore
                     for image in images { image.source = bitmap }
                 }
             }
-            if Tabs.shared.tab(showing: card.url) == nil {
+            if package, Tabs.shared.tab(showing: card.url) == nil,
+               revision == nil || WindowsCore.savedPreview(of: card.url) == revision {
                 let jpeg = try? Data(contentsOf: directory.appendingPathComponent("preview.jpg"))
                 WindowsCore.keepHomePreview(jpeg, for: card.url)
             }
@@ -120,8 +130,10 @@ import BezzleCore
     nonisolated static let command = "--home-preview"
 
     static func run(_ arguments: [String]) -> Int32 {
-        guard arguments.count == 5, let width = Double(arguments[3]), let scale = Double(arguments[4]),
+        guard arguments.count == 5 || arguments.count == 6,
+              let width = Double(arguments[3]), let scale = Double(arguments[4]),
               width > 0, scale > 0, (2...8192).contains(width * scale) else { return 2 }
+        let package = arguments.count == 5 || arguments[5] == "package"
         let height = width * 300 / 480
         let w = Int(width * scale), h = Int(height * scale)
         let design = URL(fileURLWithPath: arguments[1]), output = URL(fileURLWithPath: arguments[2], isDirectory: true)
@@ -131,7 +143,8 @@ import BezzleCore
             try WindowsCore.loadFonts(from: fonts)
             var bytes = Data(count: w * h * 4)
             let result = bytes.withUnsafeMutableBytes { pixels in
-                WindowsCore.drawHomePreview(of: design, width: width, height: height, scale: scale) { pw, ph in
+                WindowsCore.drawHomePreview(of: design, width: width, height: height, scale: scale,
+                                            package: package) { pw, ph in
                     pw == w && ph == h ? pixels.baseAddress : nil
                 }
             }

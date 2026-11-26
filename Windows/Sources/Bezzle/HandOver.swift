@@ -48,9 +48,15 @@ enum HandOver {
     nonisolated(unsafe) private static var mutex: HANDLE?
     private static let gate = NSLock()
     nonisolated(unsafe) private static var accepting = true
+    nonisolated(unsafe) private static var pending = 0
 
-    static func stopAccepting() {
-        gate.withLock { accepting = false }
+    /// An accepted launch can still be on its way to the window. Give it its turn before quitting.
+    static func stopAccepting() -> Bool {
+        gate.withLock {
+            guard pending == 0 else { return false }
+            accepting = false
+            return true
+        }
     }
 
     /// What one start hands to the other.
@@ -69,6 +75,7 @@ enum HandOver {
     private static let pipeBusy: DWORD = 231
     private static let pipeConnected: DWORD = 535
     private static let fileNotFound: DWORD = 2
+    private static let waitAbandoned: DWORD = 0x0000_0080
 
     /// Whether another copy of this Bezzle.exe runs and has taken `arguments` (with the folder
     /// this one was started in): then this one has nothing more to do. A copy that is starting
@@ -96,10 +103,12 @@ enum HandOver {
                 let header = withUnsafeBytes(of: &length) { Array($0) }
                 guard write(pipe, header + [UInt8](body)), let reply = read(pipe, 1) else { return false }
                 if reply == [1] { return true }
-                // The previous copy has saved its designs and is finishing its previews.
-                // Open in this copy once it is out of the way.
-                if let mutex { _ = WaitForSingleObject(mutex, 4000) }
-                return false
+                // Take over when the old copy ends, or give the launch to the copy that took over.
+                guard let mutex else { return false }
+                let turn = WaitForSingleObject(mutex, 100)
+                if turn == WAIT_OBJECT_0 || turn == waitAbandoned { return false }
+                if turn == WAIT_FAILED { return false }
+                continue
             }
             let error = GetLastError()
             if error == pipeBusy {
@@ -136,7 +145,11 @@ enum HandOver {
                         message = try? JSONDecoder().decode(Message.self, from: Data(body))
                     }
                     // Refuse handovers once shutdown begins so they open in the next copy.
-                    let willOpen = gate.withLock { accepting }
+                    let willOpen = gate.withLock {
+                        guard accepting, message != nil else { return false }
+                        pending += 1
+                        return true
+                    }
                     if !willOpen { message = nil }
                     _ = write(pipe, [willOpen ? 1 : 0])
                     FlushFileBuffers(pipe)
@@ -145,7 +158,10 @@ enum HandOver {
                 CloseHandle(pipe)
                 if let message {
                     DispatchQueue.main.async {
-                        MainActor.assumeIsolated { received(message.arguments, URL(fileURLWithPath: message.folder, isDirectory: true)) }
+                        MainActor.assumeIsolated {
+                            received(message.arguments, URL(fileURLWithPath: message.folder, isDirectory: true))
+                            gate.withLock { pending -= 1 }
+                        }
                     }
                 }
             }

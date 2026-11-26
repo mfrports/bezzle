@@ -12,6 +12,7 @@ import BezzleCore
 
     private var queue: [Job] = []
     private var active: Job?
+    private var home: [WindowsCore.SavedPreview] = []
     private var process: Process?
     private var scratch: URL?
     private var quitting = false
@@ -23,9 +24,28 @@ import BezzleCore
             active?.finished = finished
             return
         }
-        queue.removeAll { $0.revision.url == revision.url }
+        queue.removeAll { DesignTab.same($0.revision.url, revision.url) }
         queue.append(Job(revision: revision, finished: finished))
-        startNext()
+        startAfterCurrentEvent()
+    }
+
+    /// A Home card can draw the package JPEG while it already has this revision in memory.
+    func claimForHome(_ revision: WindowsCore.SavedPreview) -> Bool {
+        guard active?.revision != revision, !queue.contains(where: { $0.revision == revision }),
+              !home.contains(revision) else { return false }
+        home.append(revision)
+        return true
+    }
+
+    func releaseFromHome(_ revision: WindowsCore.SavedPreview) {
+        home.removeAll { $0 == revision }
+        startAfterCurrentEvent()
+    }
+
+    private func startAfterCurrentEvent() {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.startNext() }
+        }
     }
 
     func finish(_ done: @escaping () -> Void) {
@@ -39,8 +59,12 @@ import BezzleCore
 
     private func startNext() {
         guard active == nil else { return }
-        while !queue.isEmpty {
-            let job = queue.removeFirst()
+        while let next = queue.firstIndex(where: { !home.contains($0.revision) }) {
+            let job = queue.remove(at: next)
+            if WindowsCore.savedPreviewIsCurrent(job.revision) {
+                job.finished(true)
+                continue
+            }
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Bezzle-saved-preview-\(UUID())", isDirectory: true)
             let output = directory.appendingPathComponent("preview.jpg")
             let child = Process()
@@ -72,6 +96,7 @@ import BezzleCore
                 job.finished(false)
             }
         }
+        guard queue.isEmpty else { return }
         let done = onQuit
         onQuit = nil
         done?()
